@@ -288,3 +288,90 @@ elif menu == t("simulator"):
                 st.error("❌ เงินสดคงเหลือของคุณไม่เพียงพอสำหรับการทำรายการนี้")
             else:
                 st.session_state.sim_cash -= cost
+                st.session_state.portfolio_sim.append({
+                    "ticker": sim_ticker,
+                    "buy_price": sim_price,
+                    "volume": sim_vol,
+                    "timestamp": datetime.now(TH_TZ).strftime("%H:%M:%S")
+                })
+                st.success(f"✅ บันทึกคำสั่งซื้อ {sim_vol} {sim_ticker} เรียบร้อย!")
+                st.rerun()
+                
+        if col_btn2.button("🔴 RESET PORT", use_container_width=True):
+            st.session_state.portfolio_sim = []
+            st.session_state.sim_cash = 10000.0
+            st.toast("ล้างประวัติพอร์ตจำลองเรียบร้อย")
+            st.rerun()
+            
+    with s2:
+        st.markdown("#### 📁 สินทรัพย์ที่คุณถือครองอยู่ในปัจจุบัน (Current Holdings)")
+        if not st.session_state.portfolio_sim:
+            st.info("💡 พอร์ตของคุณยังว่างเปล่าอยู่ ลองส่งคำสั่งซื้อจำลองในฝั่งซ้ายมือเพื่อเริ่มสะสมหุ้น")
+        else:
+            display_records = []
+            for item in st.session_state.portfolio_sim:
+                mkt = fetch_realtime_price(item['ticker'])
+                cur_p = mkt['price'] if mkt else item['buy_price']
+                total_cost = item['buy_price'] * item['volume']
+                current_val = cur_p * item['volume']
+                unrealized_pnl = current_val - total_cost
+                pnl_pct = (unrealized_pnl / total_cost) * 100
+                
+                display_records.append({
+                    "Ticker": item['ticker'],
+                    "ทุนต้นทุน": f"${item['buy_price']:,.2f}",
+                    "ราคาตลาด": f"${cur_p:,.2f}",
+                    "จำนวนหุ้น": item['volume'],
+                    "มูลค่ารวม": f"${current_val:,.2f}",
+                    "กำไร/ขาดทุน": f"{'+' if unrealized_pnl >= 0 else ''}${unrealized_pnl:,.2f} ({pnl_pct:+.2f}%)"
+                })
+            st.dataframe(pd.DataFrame(display_records), use_container_width=True, hide_index=True)
+
+# ══════════════════════════════════════════════════════════════════════════
+# MODULE 7: NEWS & SENTIMENT
+# ══════════════════════════════════════════════════════════════════════════
+elif menu == t("news"):
+    st.title(t("news"))
+    st.subheader("📰 ศูนย์รวมข่าวสารและการวิเคราะห์ตลาดระดับมหภาค")
+    
+    search_t = st.text_input("กรอกชื่อหุ้นเพื่อกรองข่าวสารเฉพาะตัว", value="NVDA").upper()
+    
+    n_col1, n_col2 = st.columns([2, 1])
+    with n_col1:
+        st.markdown(f"#### 🔍 ข่าวสารล่าสุดของ {search_t}")
+        news_list = fetch_stock_news(search_t) if search_t else fetch_finance_news()
+        if news_list:
+            for item in news_list:
+                st.markdown(
+                    f"<div class='news-card'>"
+                    f"<small>⏱️ {item.get('published','N/A')} | สำนักข่าว: {item.get('source','N/A')}</small>"
+                    f"<br><b style='font-size:16px;'>{item.get('title','')}</b>"
+                    f"</div>", 
+                    unsafe_allow_html=True
+                )
+        else:
+            st.info("ไม่พบข่าวสารล่าของหุ้นตัวนี้ในขณะนี้")
+            
+    with n_col2:
+        st.markdown("#### 🧠 AI Sentiment Score")
+        analysis = analyze_news_impact(search_t)
+        st.metric("Market Consensus", analysis["sentiment"])
+        st.markdown(f"**คะแนนผลกระทบทางจิตวิทยา:** {analysis['score']}/100")
+        st.progress(max(0, min(100, analysis['score'])))
+
+# ══════════════════════════════════════════════════════════════════════════
+# MODULE 8: SETTINGS
+# ══════════════════════════════════════════════════════════════════════════
+elif menu == t("settings"):
+    st.title(t("settings"))
+    st.subheader("⚙️ ระบบตั้งค่าแอปพลิเคชัน (Preferences Configuration)")
+    
+    st.markdown("#### ✏️ แก้ไขรายการหุ้นเฝ้ามองด่วน (Custom Watchlist)")
+    current_wl_str = ", ".join(st.session_state.custom_watchlist)
+    updated_wl_str = st.text_area("รายชื่อหุ้น (คั่นตัวคิวด้วยเครื่องหมายจุลภาค , )", value=current_wl_str)
+    
+    if st.button("💾 บันทึกการตั้งค่า Watchlist", type="primary"):
+        parsed_tickers = [t.strip().upper() for t in updated_wl_str.split(",") if t.strip()]
+        st.session_state.custom_watchlist = parsed_tickers
+        st.success("🎉 บันทึกข้อมูล Watchlist ใหม่เข้าสู่ระบบเรียบร้อยแล้ว!")
+        st.rerun()
