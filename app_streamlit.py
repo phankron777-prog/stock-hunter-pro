@@ -5,9 +5,9 @@
 ║                                                                          ║
 ║   ✨ แนะนำการเทรดระยะสั้นรายวัน/รายสัปดาห์ (จากข้อมูลจริง)               ║
 ║   🔌 เชื่อมต่อ Yahoo Finance API + SET API จริง                           ║
-║   📊 Technical Analysis: RSI, MACD, EMA, Bollinger, ATR, Pivot          ║
+║   📊 Technical Analysis: RSI, MACD, EMA, Bollinger, ATR, Pivot           ║
 ║   📰 News Sentiment Analysis (Yahoo Finance + Google News)               ║
-║   🧪 Backtesting + Portfolio Simulator                                   ║
+║   🧪 Backtesting + Portfolio Simulator                                    ║
 ║   ☁️  พร้อม Deploy บน Streamlit Cloud                                     ║
 ║                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════╝
@@ -124,7 +124,8 @@ if "sim_cash" not in st.session_state: st.session_state["sim_cash"] = 10000.0
 T = {
     "dashboard": {"TH": "📈 แดชบอร์ดตลาด",         "EN": "📈 Market Dashboard"},
     "daily":     {"TH": "📅 สัญญาณเทรดรายวัน",     "EN": "📅 Daily Trading Signals"},
-    "weekly":    {"TH": "📆 แผนเทรดรายสัปดาห์",   "EN": "📆 Weekly Trading Plan"},
+    "weekly_auto": {"TH": "📆 แผนเทรดรายสัปดาห์ (AI)", "EN": "📆 Weekly Trading Plan (AI)"},
+    "weekly_custom": {"TH": "📅 แผนลงทุนรายสัปดาห์ (Custom)", "EN": "📅 Custom Weekly Portfolio"},
     "screener":  {"TH": "🔍 สแกนเนอร์เทคนิคอล",   "EN": "🔍 Technical Screener"},
     "backtest":  {"TH": "🧪 ทดสอบกลยุทธ์",         "EN": "🧪 Strategy Backtesting"},
     "simulator": {"TH": "🎮 จำลองการลงทุน",        "EN": "🎮 Portfolio Simulator"},
@@ -144,7 +145,18 @@ with st.sidebar:
     st.divider()
     st.session_state.lang = st.radio("🌐 ภาษา / Language", ["TH", "EN"], horizontal=True, index=0 if st.session_state.lang == "TH" else 1)
     st.divider()
-    menu = st.radio("🧭 เมนู / Menu", [t("dashboard"), t("daily"), t("weekly"), t("screener"), t("backtest"), t("simulator"), t("news"), t("settings")])
+    # เพิ่มเมนูตารางจัดการหุ้นรายสัปดาห์แบบกำหนดเองเข้าไปใน Sidebar
+    menu = st.radio("🧭 เมนู / Menu", [
+        t("dashboard"), 
+        t("daily"), 
+        t("weekly_auto"), 
+        t("weekly_custom"), # เมนูตัวใหม่สำหรับตั้งค่าเอง
+        t("screener"), 
+        t("backtest"), 
+        t("simulator"), 
+        t("news"), 
+        t("settings")
+    ])
     st.divider()
     st.caption(f"🇹🇭 {get_thai_date()} | 🕐 {now.strftime('%H:%M:%S')} (ICT)")
 
@@ -156,7 +168,7 @@ def fmt_pct(val, decimals=2): return f"{'🟢 +' if val >= 0 else '🔴 '}{val:.
 def score_bar(score, width=20): return "🟩" * max(0, min(width, int((score + 100) / 200 * width))) + "⬜" * (width - max(0, min(width, int((score + 100) / 200 * width))))
 
 # ══════════════════════════════════════════════════════════════════════════
-# MODULE 1 - 5 (โค้ดดั้งเดิมของคุณคงไว้ครบถ้วน)
+# MODULES 1 - 5 
 # ══════════════════════════════════════════════════════════════════════════
 if menu == t("dashboard"):
     st.title(t("dashboard"))
@@ -223,14 +235,79 @@ elif menu == t("daily"):
             for r in rec["reasons"]: d3.markdown(f"- {r}")
             st.divider()
 
-elif menu == t("weekly"):
-    st.title(t("weekly"))
+elif menu == t("weekly_auto"):
+    st.title(t("weekly_auto"))
     market_choice = st.radio("เลือกตลาด", ["🇹🇭 หุ้นไทย (SET)", "🇺🇸 หุ้น US"], horizontal=True)
     wl = TH_POPULAR_STOCKS if "ไทย" in market_choice else US_POPULAR_STOCKS
     if st.button("📋 สร้างแผนเทรดรายสัปดาห์", type="primary"):
         recs = generate_daily_recommendations(wl, top_n=5)
         if recs:
             st.dataframe(generate_weekly_plan(recs), use_container_width=True, hide_index=True)
+
+# ══════════════════════════════════════════════════════════════════════════
+# NEW MODULE: CUSTOM WEEKLY PORTFOLIO (คุณกำหนดเองว่าจะเล่นหุ้นอะไรเท่าไหร่ได้เลย)
+# ══════════════════════════════════════════════════════════════════════════
+elif menu == t("weekly_custom"):
+    st.title(t("weekly_custom"))
+    st.subheader("📅 จัดพอร์ตหุ้นรายสัปดาห์สไตล์คุณ (Custom Allocation)")
+    st.markdown("กำหนดสัดส่วนกระสุนลงทุนรายสัปดาห์ แยกยอดเงินลงทุนตามใจชอบ")
+    
+    st.divider()
+    
+    # 1. กำหนดทุนรวมที่จะเล่นรอบสัปดาห์นี้
+    total_weekly_funds = st.number_input("💵 จำนวนเงินลงทุนรวมประจำสัปดาห์นี้ (USD หรือ THB):", min_value=0.0, value=1000.0, step=100.0)
+    
+    st.write(os.linesep)
+    st.markdown("#### 🛠️ กำหนดหุ้นและจัดสัดส่วน (%)")
+    
+    # ใช้ Columns ให้ฟอร์มกรอกข้อมูลออกมาเป็นแถวหน้าตาสวยงาม
+    col_st, col_wt = st.columns(2)
+    
+    with col_st:
+        st_1 = st.text_input("ระบุหุ้นตัวที่ 1 (Ticker)", value="QQQM").upper()
+        st_2 = st.text_input("ระบุหุ้นตัวที่ 2 (Ticker)", value="SCHD").upper()
+        st_3 = st.text_input("ระบุหุ้นตัวที่ 3 (Ticker)", value="NVDA").upper()
+        st_4 = st.text_input("ระบุหุ้นตัวที่ 4 (Ticker)", value="DVN").upper()
+        
+    with col_wt:
+        wt_1 = st.number_input("สัดส่วนตัวที่ 1 (%)", min_value=0, max_value=100, value=40, step=5)
+        wt_2 = st.number_input("สัดส่วนตัวที่ 2 (%)", min_value=0, max_value=100, value=30, step=5)
+        wt_3 = st.number_input("สัดส่วนตัวที่ 3 (%)", min_value=0, max_value=100, value=20, step=5)
+        wt_4 = st.number_input("สัดส่วนตัวที่ 4 (%)", min_value=0, max_value=100, value=10, step=5)
+        
+    total_pct = wt_1 + wt_2 + wt_3 + wt_4
+    
+    st.divider()
+    
+    # ตรวจสอบการคุมความเสี่ยง (รวมต้องได้ 100%)
+    if total_pct != 100:
+        st.error(f"⚠️ สัดส่วนรวมในขณะนี้คือ {total_pct}% ! กรุณาปรับเพิ่มหรือลดสัดส่วนเป้าหมายให้รวมกันได้ครบ 100% พอดีนะครับ")
+    else:
+        st.success(f"✅ สัดส่วนพอร์ตครบ {total_pct}% เรียบร้อย! ดีดสูตรคำนวณแบ่งยอดเงินซื้อจริงให้ด้านล่างนี้เลย:")
+        
+        # ดำเนินการคัดแยกสัดส่วนเม็ดเงิน
+        amt_1 = total_weekly_funds * (wt_1 / 100)
+        amt_2 = total_weekly_funds * (wt_2 / 100)
+        amt_3 = total_weekly_funds * (wt_3 / 100)
+        amt_4 = total_weekly_funds * (wt_4 / 100)
+        
+        # ดึงราคาตลาดปัจจุบันมาเฉลยจำนวนหุ้นที่จะได้รับเบื้องต้น
+        p1 = fetch_realtime_price(st_1)['price'] if fetch_realtime_price(st_1) else 1.0
+        p2 = fetch_realtime_price(st_2)['price'] if fetch_realtime_price(st_2) else 1.0
+        p3 = fetch_realtime_price(st_3)['price'] if fetch_realtime_price(st_3) else 1.0
+        p4 = fetch_realtime_price(st_4)['price'] if fetch_realtime_price(st_4) else 1.0
+        
+        # จัดตารางสวยๆ
+        custom_p_df = pd.DataFrame({
+            "ชื่อย่อหุ้น (Ticker)": [st_1, st_2, st_3, st_4],
+            "สัดส่วนเป้าหมาย": [f"{wt_1}%", f"{wt_2}%", f"{wt_3}%", f"{wt_4}%"],
+            "ยอดเงินที่ต้องใช้ช้อป": [f"${amt_1:,.2f}", f"${amt_2:,.2f}", f"${amt_3:,.2f}", f"${amt_4:,.2f}"],
+            "ราคาตลาดประมาณการ": [f"${p1:,.2f}", f"${p2:,.2f}", f"${p3:,.2f}", f"${p4:,.2f}"],
+            "จำนวนหุ้นที่จะได้ (Est. Vol)": [f"{amt_1/p1:,.4f} หุ้น", f"{amt_2/p2:,.4f} หุ้น", f"{amt_3/p3:,.4f} หุ้น", f"{amt_4/p4:,.4f} หุ้น"]
+        })
+        
+        st.dataframe(custom_p_df, use_container_width=True, hide_index=True)
+        st.caption("💡 หมายเหตุ: ระบบจะดึงราคาตลาดปัจจุบันของแท้มาสับคัดสัดส่วนให้แบบไดนามิกทันทีที่คุณกรอกตัวเลข")
 
 elif menu == t("screener"):
     st.title(t("screener"))
@@ -247,16 +324,14 @@ elif menu == t("backtest"):
         st.metric("RSI Strategy Return", "+24.50%", "ชนะตลาด (Benchmark)")
 
 # ══════════════════════════════════════════════════════════════════════════
-# MODULE 6: PORTFOLIO SIMULATOR (แก้ไขรหัสที่ขาดหายเติมเต็มระบบ)
+# MODULE 6: PORTFOLIO SIMULATOR 
 # ══════════════════════════════════════════════════════════════════════════
 elif menu == t("simulator"):
     st.title(t("simulator"))
     
-    # ส่วนหัวแดชบอร์ดพอร์ตลงทุน
     c_m1, c_m2, c_m3 = st.columns(3)
     c_m1.metric("💵 เงินสดจำลองคงเหลือ (Cash)", f"${st.session_state.sim_cash:,.2f}")
     
-    # คำนวณมูลค่าพอร์ตปัจจุบันตามราคาตลาด (Mark-to-Market)
     total_asset_val = 0.0
     for asset in st.session_state.portfolio_sim:
         current_mkt = fetch_realtime_price(asset['ticker'])
@@ -274,7 +349,6 @@ elif menu == t("simulator"):
         st.markdown("#### 📝 สั่งซื้อ/ขาย (Order Execution)")
         sim_ticker = st.text_input("ระบุสัญลักษณ์หุ้น (Ticker)", value="NVDA", key="sim_t").upper()
         
-        # ดึงราคาแบบ Real-time มาตั้งค่าเริ่มต้นอัตโนมัติเพื่อความสะดวก
         mkt_info = fetch_realtime_price(sim_ticker)
         suggested_price = mkt_info['price'] if mkt_info else 100.00
         
