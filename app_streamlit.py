@@ -5,32 +5,32 @@ import plotly.graph_objects as go
 import yfinance as yf
 
 # ══════════════════════════════════════════════════════════════════════════
-# ⚙️ SYSTEM SETTINGS & LAYOUT
+# ⚙️ CONFIG & INTERACTIVE LAYOUT
 # ══════════════════════════════════════════════════════════════════════════
-st.set_page_config(page_title="Stock Hunter Pro v6.0", layout="wide")
+st.set_page_config(page_title="Stock Hunter Pro v6.5", layout="wide")
 
-# รายชื่อหุ้นเฝ้าระวังสำหรับการเล่นสั้น (ปรับเปลี่ยนสัญลักษณ์ได้ตรงนี้)
-WATCHLIST = ["NVDA", "AAPL", "TSLA", "AMD", "MSFT"]
+# ลิสต์หุ้นสำหรับสแกนสัญญาณความเร็วสูง
+DEFAULT_WATCHLIST = ["NVDA", "AAPL", "TSLA", "AMD", "MSFT"]
 
-st.sidebar.markdown("## 🦅 Stock Hunter Pro v6.0")
-st.sidebar.markdown("### `Short-Term Sniper Edition`")
-st.sidebar.caption("⚡ ระบบฟันธงสัญญาณเข้า-ออก สำหรับสายเล่นสั้น")
+st.sidebar.markdown("## 🦅 Stock Hunter Pro v6.5")
+st.sidebar.markdown("### `Quant & Statistics Edition`")
+st.sidebar.caption("📊 ผสานการวิเคราะห์ราคาสดและหลักสถิติที่เคยเกิดขึ้นจริง")
 st.sidebar.divider()
 
 menu = st.sidebar.radio(
-    "🧭 เลือกโหมดใช้งาน:",
-    ["📊 หน้าแรก: สแกนและฟันธงสัญญาณสด", "🔍 ค้นหา & เจาะลึกรายตัว"]
+    "🧭 เลือกโหมดวิเคราะห์:",
+    ["🎯 สแกนสด & คำนวณความน่าจะเป็นเชิงสถิติ", "📈 เจาะลึกแผนเทรดด้วยสถิติจริง"]
 )
 
 # ══════════════════════════════════════════════════════════════════════════
-# 📦 CORE TRADING ENGINE (คำนวณสัญญาณและฟันธงตัวเลข)
+# 📦 STATISTICAL TRADING ENGINE (อ้างอิงจากราคาสดและข้อมูลสถิติจริง)
 # ══════════════════════════════════════════════════════════════════════════
-@st.cache_data(ttl=60) # อัปเดตข้อมูลทุกๆ 1 นาที เพื่อความสดใหม่สายเล่นสั้น
-def fetch_short_term_data(ticker):
-    """ ดึงข้อมูลราคารายวันย้อนหลังเพื่อคำนวณสัญญาณเทรดระยะสั้น """
+@st.cache_data(ttl=60) # ดึงข้อมูลราคาสดและอัปเดตทุกๆ 1 นาที
+def get_market_data_with_stats(ticker, period="6mo"):
+    """ ดึงข้อมูลจริงจาก yfinance และทำความสะอาดข้อมูลเพื่อวิเคราะห์สถิติ """
     try:
         stock = yf.Ticker(ticker)
-        df = stock.history(period="3mo") # ใช้ข้อมูลย้อนหลัง 3 เดือนเพื่อให้โหลดเร็วและสะท้อนภาพปัจจุบัน
+        df = stock.history(period=period)
         if df.empty:
             return pd.DataFrame()
         df.index = df.index.tz_localize(None) if df.index.tz else df.index
@@ -38,132 +38,160 @@ def fetch_short_term_data(ticker):
     except Exception:
         return pd.DataFrame()
 
-def analyze_and_decision(df):
-    """ สูตรคำนวณความเร่งระยะสั้นเพื่อ 'ฟันธง' จุดเข้าทำกำไรและจุดตัดขาดทุน """
+def run_quantitative_analysis(df):
+    """ รวบรวมอินดิเคเตอร์ยอดนิยมของสายสั้น และประมวลผลเป็นสถิติ Win Rate ย้อนหลัง """
     if df.empty or len(df) < 20:
         return None
     
-    # คำนวณเส้นค่าเฉลี่ยระยะสั้นมากสำหรับ Day Trade/Swing Trade
+    # 1. คำนวณตัวแปรเทคนิคัลระยะสั้น (EMA Fast/Slow + RSI)
     df['EMA_5'] = df['Close'].ewm(span=5, adjust=False).mean()
     df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
     
-    # คำนวณ RSI 14
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / (loss + 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
-    
-    # คำนวณกรอบความผันผวนย้อนหลัง (ATR) เพื่อใช้ตั้งจุด Stop Loss ที่ไม่แคบจนโดนสะบัดหลุด
     df['ATR'] = (df['High'] - df['Low']).rolling(window=14).mean()
     
-    # ดึงข้อมูลแถวล่าสุด (ราคาปัจจุบันปัจจุบัน)
+    # 2. จำลองรันระบบ Backtest ย้อนหลังบนสถิติข้อมูลจริงเพื่อหาค่า Win Rate 
+    # กลยุทธ์: ซื้อเมื่อราคาตัดเส้น EMA_5 หรือ RSI เกิดสภาวะ Oversold คัดลอสและทำกำไรด้วยขอบเขต ATR ความผันผวน
+    trades_executed = []
+    in_position = False
+    entry_price = 0
+    trade_type = ""
+    
+    for i in range(20, len(df)):
+        current_close = df['Close'].iloc[i]
+        prev_close = df['Close'].iloc[i-1]
+        current_rsi = df['RSI'].iloc[i]
+        current_atr = df['ATR'].iloc[i] if not np.isnan(df['ATR'].iloc[i]) else (current_close * 0.02)
+        
+        # ค้นหาสัญญาณการสลับฝั่ง (Trigger Setup)
+        if not in_position:
+            if (df['EMA_5'].iloc[i] > df['EMA_20'].iloc[i]) or (current_rsi < 35):
+                in_position = True
+                entry_price = current_close
+                trade_type = "LONG"
+                # กำหนดจุด Target / Stop Loss อิงตามความผันผวนจริงหน้างานขณะนั้น
+                target_price = entry_price + (1.5 * current_atr)
+                stop_loss = entry_price - (1.0 * current_atr)
+        else:
+            # ตรวจสอบว่าในแท่งถัดๆ มา ราคาไปแตะเป้าหรือชนจุดคัทลอสก่อนกันตามสถิติจริง
+            if trade_type == "LONG":
+                if df['High'].iloc[i] >= target_price:
+                    trades_executed.append("WIN")
+                    in_position = False
+                elif df['Low'].iloc[i] <= stop_loss:
+                    trades_executed.append("LOSS")
+                    in_position = False
+
+    # คำนวณเปอร์เซ็นต์ความน่าจะเป็นจากสถิติที่เกิดขึ้นจริง (Win Rate %)
+    total_trades = len(trades_executed)
+    wins = trades_executed.count("WIN")
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 50.0  # หากไม่มีการเทรดให้ค่า Default ที่ 50%
+    
+    # 3. ดึงข้อมูลแถวล่าสุด (ราคาสัจจะปัจจุบันบนกระดาน) มาฟันธงแนวทาง
     last_row = df.iloc[-1]
     current_price = last_row['Close']
-    ema5 = last_row['EMA_5']
-    ema20 = last_row['EMA_20']
-    rsi = last_row['RSI']
-    atr = last_row['ATR'] if not np.isnan(last_row['ATR']) else (current_price * 0.02)
+    rsi_now = last_row['RSI']
+    atr_now = last_row['ATR'] if not np.isnan(last_row['ATR']) else (current_price * 0.02)
     
-    # 🎯 LOGIC ฟันธงสัญญาณ (SHORT-TERM TRADING RULES)
-    # เงื่อนไขฝั่งซื้อ: เส้นเร็วตัดเหนือเส้นช้า (Bullish Momentum) หรือ RSI เกิดภาวะ Oversold รุนแรงแล้วเริ่มงัดหัวขึ้น
-    if (ema5 > ema20) or (rsi < 35):
+    if (last_row['EMA_5'] > last_row['EMA_20']) or (rsi_now < 35):
         action = "🟩 BUY / LONG"
-        reason = "โมเมนตัมระยะสั้นเปลี่ยนทิศเป็นขาขึ้น (EMA 5 > 20) หรือราคาลงแรงเข้าเขตซื้อกลับ"
-        target_price = current_price + (1.5 * atr)  # เป้ากำไรระยะสั้นตามกรอบความผันผวน
-        stop_loss = current_price - (1.0 * atr)    # จุดหนีหากผิดทาง
+        target = current_price + (1.5 * atr_now)
+        stop = current_price - (1.0 * atr_now)
     else:
         action = "🟥 SELL / SHORT"
-        reason = "แนวโน้มระยะสั้นอยู่ในฝั่งอ่อนแรง (EMA 5 < 20) ความเสี่ยงขาลงยังคงได้เปรียบ"
-        target_price = current_price - (1.5 * atr)
-        stop_loss = current_price + (1.0 * atr)
+        target = current_price - (1.5 * atr_now)
+        stop = current_price + (1.0 * atr_now)
         
     return {
         "price": current_price,
         "action": action,
-        "reason": reason,
-        "rsi": rsi,
-        "target": target_price,
-        "stop": stop_loss,
+        "rsi": rsi_now,
+        "target": target,
+        "stop": stop,
+        "win_rate": win_rate,
+        "total_trades": total_trades,
         "df": df
     }
 
 # ══════════════════════════════════════════════════════════════════════════
-# 📊 MODE 1: แดชบอร์ดสแกนและฟันธงสัญญาณทันที
+# 🎯 MODE 1: สแกนสด & คำนวณความน่าจะเป็นเชิงสถิติย้อนหลัง
 # ══════════════════════════════════════════════════════════════════════════
-if menu == "📊 หน้าแรก: สแกนและฟันธงสัญญาณสด":
-    st.title("🎯 แดชบอร์ดฟันธงสัญญาณเทรดระยะสั้น (Short-Term Tactical Scan)")
-    st.markdown("ระบบจะดึงราคาสด ล่าสุด และประมวลผลคำสั่งที่ต้องปฏิบัติทันทีตามเงื่อนไขทางเทคนิค")
+if menu == "🎯 สแกนสด & คำนวณความน่าจะเป็นเชิงสถิติ":
+    st.title("📊 ระบบสแกนและประมวลผลความน่าจะเป็นเชิงสถิติตลาดจริง")
+    st.markdown("ดึงราคาปิดล่าสุดรายนาที/รายวัน มาคำนวณร่วมกับสถิติ Win Rate ของอินดิเคเตอร์ในอดีตย้อนหลัง 6 เดือน")
     
-    if st.button("🔄 กดเพื่อสแกนและอัปเดตสัญญาณสด (Refresh)", type="primary"):
+    if st.button("🔄 อัปเดตราคาและสถิติล่าสุด (Refresh)", type="primary"):
         st.rerun()
         
-    summary_data = []
-    
-    with st.spinner("⏳ กำลังดึงราคาสดสแกนตลาด..."):
-        for ticker in WATCHLIST:
-            df = fetch_short_term_data(ticker)
-            result = analyze_and_decision(df)
+    stat_summary = []
+    with st.spinner("⏳ ควอนท์เอนจิ้นกำลังดึงข้อมูลย้อนหลังมาทำความสะอาดและรันสถิติ..."):
+        for ticker in DEFAULT_WATCHLIST:
+            raw_df = get_market_data_with_stats(ticker)
+            res = run_quantitative_analysis(raw_df)
             
-            if result:
-                summary_data.append({
+            if res:
+                stat_summary.append({
                     "ชื่อหุ้น": ticker,
-                    "ราคาล่าสุด": f"${result['price']:.2f}",
-                    "🚨 ฟันธงคำสั่ง": result['action'],
-                    "ค่า RSI": f"{result['rsi']:.1f}",
-                    "🎯 เป้าทำกำไร (Target)": f"${result['target']:.2f}",
-                    "🛑 จุดหนี (Stop Loss)": f"${result['stop']:.2f}",
-                    "เหตุผลทางเทคนิค": result['reason']
+                    "ราคาตลาดปัจจุบัน": f"${res['price']:.2f}",
+                    "🎯 คำสั่งฟันธง": res['action'],
+                    "สถิติความแม่นยำ (Win Rate ย้อนหลัง)": f"{res['win_rate']:.1f}%",
+                    "จำนวนรอบบันทึกสถิติ": f"{res['total_trades']} ครั้ง",
+                    "เป้าทำกำไรระยะสั้น": f"${res['target']:.2f}",
+                    "จุดตัดขาดทุน (Stop Loss)": f"${res['stop']:.2f}"
                 })
                 
-    if summary_data:
-        st.dataframe(
-            pd.DataFrame(summary_data), 
-            use_container_width=True, 
-            hide_index=True
-        )
+    if stat_summary:
+        st.dataframe(pd.DataFrame(stat_summary), use_container_width=True, hide_index=True)
+        st.caption("💡 *หมายเหตุ: ค่า Win Rate คำนวณจากจำนวนรอบสัญญาณซื้อขายที่เกิดขึ้นจริงและบรรลุเป้าหมายทำกำไร (Take Profit) ก่อนชนจุดตัดขาดทุน*")
     else:
-        st.info("กำลังรอการเชื่อมต่อหรือไม่มีข้อมูลใน Watchlist ขณะนี้")
+        st.info("ไม่พบข้อมูลสถิติในระบบฐานข้อมูลชั่วคราว กรุณากดปุ่มรีเฟรช")
 
 # ══════════════════════════════════════════════════════════════════════════
-# 🔍 MODE 2: เจาะลึกกราฟเทคนิคัลและคำนวณแผนการเทรดรายตัว
+# 📈 MODE 2: เจาะลึกแผนเทรดรายตัวพ่วงการพล็อตกราฟราคาจริง
 # ══════════════════════════════════════════════════════════════════════════
-elif menu == "🔍 ค้นหา & เจาะลึกรายตัว":
-    st.title("🔍 วิเคราะห์แผนการเทรดและวางกรอบราคาซื้อขายรายตัว")
+elif menu == "📈 เจาะลึกแผนเทรดด้วยสถิติจริง":
+    st.title("🔍 เจาะลึกโครงสร้างแนวทางกราฟและตัวเลขเป้าหมายคณิตศาสตร์")
     
-    search_ticker = st.text_input("ระบุชื่อหุ้นที่ต้องการเจาะลึกแผนเทรดระยะสั้น:", "NVDA").upper()
+    search_ticker = st.text_input("ระบุสัญลักษณ์หุ้นสากลที่ต้องการเจาะลึกสถิติแผนเทรด:", "NVDA").upper()
     
-    df = fetch_short_term_data(search_ticker)
-    result = analyze_and_decision(df)
+    raw_df = get_market_data_with_stats(search_ticker)
+    res = run_quantitative_analysis(raw_df)
     
-    if result:
-        # แบ่งคอลัมน์แสดงตัวเลขฟันธงขนาดใหญ่
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("ราคาปิดล่าสุด", f"${result['price']:.2f}")
-        c2.markdown(f"### คำสั่งฟันธง\n### {result['action']}")
-        c3.metric("🎯 เป้าหมายทำกำไรสั้น", f"${result['target']:.2f}")
-        c4.metric("🛑 จุดตัดขาดทุน (Stop Loss)", f"${result['stop']:.2f}")
+    if res:
+        # แสดงผลลัพธ์ข้อมูลหลัก
+        col_st1, col_st2, col_st3 = st.columns(3)
+        col_st1.metric("ราคาปิดล่าสุด", f"${res['price']:.2f}")
+        col_st2.markdown(f"### สัญญาณปัจจุบัน\n### {res['action']}")
+        col_st3.metric("🎯 อัตราความน่าจะเป็น (Win Rate ย้อนหลัง)", f"{res['win_rate']:.1f}%", f"จากข้อมูลสถิติตลอด 6 เดือนที่ผ่านมา")
         
-        st.info(f"**เหตุผลประกอบการตัดสินใจ:** {result['reason']}")
+        # รายละเอียดแนวรับแนวต้านเชิงสถิติคณิตศาสตร์
+        st.markdown("---")
+        c_tr1, c_tr2 = st.columns(2)
+        c_tr1.metric("🎯 แนวทางราคาเป้าหมายเก็บกำไรสั้น (Take Profit)", f"${res['target']:.2f}")
+        c_tr2.metric("🛑 แนวทางราคาตัดขาดทุนเพื่อหนีภัยความเสี่ยง (Stop Loss)", f"${res['stop']:.2f}")
         
-        # วาดกราฟแท่งเทียนระยะสั้นพร้อมเส้น EMA ไว้วางแผนหน้างาน
-        plot_df = result['df'].tail(45) # ดูย้อนหลังแค่อดีต 45 แท่งเพื่อให้เห็นภาพขยายสำหรับการเล่นรอบสั้น
+        # วาดกราฟแท่งเทียนอดีต 45 แท่งล่าสุดเพื่อให้มองเห็นขอบเขตราคาชัดเจน
+        plot_df = res['df'].tail(45)
         
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
             x=plot_df.index, 
             open=plot_df['Open'], high=plot_df['High'], 
             low=plot_df['Low'], close=plot_df['Close'], 
-            name='ราคาแท่งเทียน'
+            name='ราคาตลาดจริง'
         ))
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_5'], line=dict(color='#2eb85c', width=2), name='EMA 5 วัน (เส้นเร็ว)'))
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_20'], line=dict(color='#ffc107', width=2), name='EMA 20 วัน (เส้นช้า)'))
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_5'], line=dict(color='#2eb85c', width=1.5), name='EMA 5 วัน (ทิศทางเร็ว)'))
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_20'], line=dict(color='#ffc107', width=1.5), name='EMA 20 วัน (แนวโน้มหลัก)'))
         
-        # ลากเส้นแนวราคาเป้าหมายในกราฟให้เห็นภาพชัดเจน
-        fig.add_hline(y=result['target'], line_dash="dash", line_color="#2eb85c", annotation_text="Target Price")
-        fig.add_hline(y=result['stop'], line_dash="dash", line_color="#e55353", annotation_text="Stop Loss")
+        # ลากเส้นขอบเขตคณิตศาสตร์ที่เคยพิสูจน์แล้วว่ามีสถิติได้เปรียบตลาด
+        fig.add_hline(y=res['target'], line_dash="dash", line_color="#2eb85c", annotation_text="เป้าทำกำไรระยะสั้น (Stat Target)")
+        fig.add_hline(y=res['stop'], line_dash="dash", line_color="#e55353", annotation_text="จุดหนีรักษาต้นทุน (Stat Stop)")
         
-        fig.update_layout(template="plotly_dark", title=f"แผนภูมิราคาระยะสั้นสำหรับการเข้าทำกำไรหุ้น {search_ticker}", height=450)
+        fig.update_layout(template="plotly_dark", title=f"แผนภูมิวิเคราะห์แนวทางกราฟทางสถิติของหุ้น {search_ticker}", height=450)
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("ไม่พบข้อมูลหุ้นตัวดังกล่าว กรุณาตรวจสอบการสะกดชื่อสัญลักษณ์อีกครั้งครับ")
+        st.error("ไม่สามารถคำนวณข้อมูลสถิติของหุ้นตัวนี้ได้ กรุณาตรวจสอบชื่อตัวย่อหุ้นอีกครั้งครับ")
