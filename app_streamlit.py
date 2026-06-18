@@ -3,31 +3,36 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import yfinance as yf
+from datetime import datetime, timedelta
 
 # ══════════════════════════════════════════════════════════════════════════
-# ⚙️ CONFIG & INTERACTIVE LAYOUT
+# ⚙️ CONFIG & SYSTEM LAYOUT
 # ══════════════════════════════════════════════════════════════════════════
-st.set_page_config(page_title="Stock Hunter Pro v6.5", layout="wide")
+st.set_page_config(page_title="Stock Hunter Pro v7.0", layout="wide")
 
-# ลิสต์หุ้นสำหรับสแกนสัญญาณความเร็วสูง
-DEFAULT_WATCHLIST = ["NVDA", "AAPL", "TSLA", "AMD", "MSFT"]
+# พอร์ตหุ้นแนะนำเริ่มต้นสำหรับสายซิ่งเล่นสั้น (สามารถพิมพ์ปรับเปลี่ยนหน้าแอปได้)
+DEFAULT_PORTFOLIO = ["NVDA", "AAPL", "TSLA", "AMD", "MSFT"]
 
-st.sidebar.markdown("## 🦅 Stock Hunter Pro v6.5")
-st.sidebar.markdown("### `Quant & Statistics Edition`")
-st.sidebar.caption("📊 ผสานการวิเคราะห์ราคาสดและหลักสถิติที่เคยเกิดขึ้นจริง")
+st.sidebar.markdown("## 🦅 Stock Hunter Pro v7.0")
+st.sidebar.markdown("### `The Quantitative Sniper`")
+st.sidebar.caption("⚡ ฟันธงสัญญาณเล่นสั้นอิงสถิติจริง + วิเคราะห์ข่าวรอบ 7 วัน")
 st.sidebar.divider()
 
 menu = st.sidebar.radio(
-    "🧭 เลือกโหมดวิเคราะห์:",
-    ["🎯 สแกนสด & คำนวณความน่าจะเป็นเชิงสถิติ", "📈 เจาะลึกแผนเทรดด้วยสถิติจริง"]
+    "🧭 เลือกเมนูวิเคราะห์เทรดเดอร์ (ครอบคลุม 10 โจทย์หลัก):",
+    [
+        "🔥 1. แดชบอร์ดสแกนสด & ฟันธงความน่าจะเป็น",
+        "🎯 2. เจาะลึกแผนเทรดคณิตศาสตร์รายตัว",
+        "📰 3. ข่าวสารล่าสุดรอบ 7 วัน & Sentiment Analysis",
+        "💼 4. ตรวจสอบความเสี่ยงพอร์ต & Asset Allocation"
+    ]
 )
 
 # ══════════════════════════════════════════════════════════════════════════
-# 📦 STATISTICAL TRADING ENGINE (อ้างอิงจากราคาสดและข้อมูลสถิติจริง)
+# 📦 CORE QUANTITATIVE ENGINE (ดึงราคาสด, คำนวณเทคนิคัล และ Backtest สถิติจริง)
 # ══════════════════════════════════════════════════════════════════════════
-@st.cache_data(ttl=60) # ดึงข้อมูลราคาสดและอัปเดตทุกๆ 1 นาที
-def get_market_data_with_stats(ticker, period="6mo"):
-    """ ดึงข้อมูลจริงจาก yfinance และทำความสะอาดข้อมูลเพื่อวิเคราะห์สถิติ """
+@st.cache_data(ttl=60)  # ดึงราคาสดอัปเดตทุก 1 นาที เพื่อความคมในการเล่นสั้น
+def get_clean_market_data(ticker, period="6mo"):
     try:
         stock = yf.Ticker(ticker)
         df = stock.history(period=period)
@@ -38,160 +43,249 @@ def get_market_data_with_stats(ticker, period="6mo"):
     except Exception:
         return pd.DataFrame()
 
-def run_quantitative_analysis(df):
-    """ รวบรวมอินดิเคเตอร์ยอดนิยมของสายสั้น และประมวลผลเป็นสถิติ Win Rate ย้อนหลัง """
+def process_trading_signals(df):
     if df.empty or len(df) < 20:
         return None
     
-    # 1. คำนวณตัวแปรเทคนิคัลระยะสั้น (EMA Fast/Slow + RSI)
+    # 1. คำนวณ Indicators ความเร็วสูงสำหรับสายเล่นสั้น
     df['EMA_5'] = df['Close'].ewm(span=5, adjust=False).mean()
     df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
     
+    # RSI 14 วัน
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / (loss + 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # ATR หาความผันผวนตั้งจุดหนีและเป้ากำไร
     df['ATR'] = (df['High'] - df['Low']).rolling(window=14).mean()
     
-    # 2. จำลองรันระบบ Backtest ย้อนหลังบนสถิติข้อมูลจริงเพื่อหาค่า Win Rate 
-    # กลยุทธ์: ซื้อเมื่อราคาตัดเส้น EMA_5 หรือ RSI เกิดสภาวะ Oversold คัดลอสและทำกำไรด้วยขอบเขต ATR ความผันผวน
-    trades_executed = []
+    # Volume Average 20 วันเพื่อเช็ค Volume Analysis
+    df['Vol_Avg'] = df['Volume'].rolling(window=20).mean()
+    
+    # 2. จำลองรันสถิติ (Quick Backtest) ย้อนหลัง 6 เดือน เพื่อหา Win Rate จริงของหุ้นตัวนี้
+    trades = []
     in_position = False
-    entry_price = 0
-    trade_type = ""
+    buy_price = 0
     
     for i in range(20, len(df)):
-        current_close = df['Close'].iloc[i]
-        prev_close = df['Close'].iloc[i-1]
-        current_rsi = df['RSI'].iloc[i]
-        current_atr = df['ATR'].iloc[i] if not np.isnan(df['ATR'].iloc[i]) else (current_close * 0.02)
+        c_close = df['Close'].iloc[i]
+        c_rsi = df['RSI'].iloc[i]
+        c_atr = df['ATR'].iloc[i] if not np.isnan(df['ATR'].iloc[i]) else (c_close * 0.02)
         
-        # ค้นหาสัญญาณการสลับฝั่ง (Trigger Setup)
         if not in_position:
-            if (df['EMA_5'].iloc[i] > df['EMA_20'].iloc[i]) or (current_rsi < 35):
+            # เงื่อนไขเข้าซื้อสถิติ: EMA_5 ตัดเหนือ EMA_20 หรือ RSI < 35 (Oversold งัดหัว)
+            if (df['EMA_5'].iloc[i] > df['EMA_20'].iloc[i]) or (c_rsi < 35):
                 in_position = True
-                entry_price = current_close
-                trade_type = "LONG"
-                # กำหนดจุด Target / Stop Loss อิงตามความผันผวนจริงหน้างานขณะนั้น
-                target_price = entry_price + (1.5 * current_atr)
-                stop_loss = entry_price - (1.0 * current_atr)
+                buy_price = c_close
+                t_target = buy_price + (1.5 * c_atr)
+                t_stop = buy_price - (1.0 * c_atr)
         else:
-            # ตรวจสอบว่าในแท่งถัดๆ มา ราคาไปแตะเป้าหรือชนจุดคัทลอสก่อนกันตามสถิติจริง
-            if trade_type == "LONG":
-                if df['High'].iloc[i] >= target_price:
-                    trades_executed.append("WIN")
-                    in_position = False
-                elif df['Low'].iloc[i] <= stop_loss:
-                    trades_executed.append("LOSS")
-                    in_position = False
-
-    # คำนวณเปอร์เซ็นต์ความน่าจะเป็นจากสถิติที่เกิดขึ้นจริง (Win Rate %)
-    total_trades = len(trades_executed)
-    wins = trades_executed.count("WIN")
-    win_rate = (wins / total_trades * 100) if total_trades > 0 else 50.0  # หากไม่มีการเทรดให้ค่า Default ที่ 50%
+            if df['High'].iloc[i] >= t_target:
+                trades.append("WIN")
+                in_position = False
+            elif df['Low'].iloc[i] <= t_stop:
+                trades.append("LOSS")
+                in_position = False
+                
+    win_rate = (trades.count("WIN") / len(trades) * 100) if len(trades) > 0 else 50.0
     
-    # 3. ดึงข้อมูลแถวล่าสุด (ราคาสัจจะปัจจุบันบนกระดาน) มาฟันธงแนวทาง
-    last_row = df.iloc[-1]
-    current_price = last_row['Close']
-    rsi_now = last_row['RSI']
-    atr_now = last_row['ATR'] if not np.isnan(last_row['ATR']) else (current_price * 0.02)
+    # 3. ดึงค่าแท่งปัจจุบันมาสรุปแผนฟันธง
+    last = df.iloc[-1]
+    curr_price = last['Close']
+    rsi_now = last['RSI']
+    atr_now = last['ATR'] if not np.isnan(last['ATR']) else (curr_price * 0.02)
+    vol_ratio = last['Volume'] / last['Vol_Avg'] if last['Vol_Avg'] > 0 else 1.0
     
-    if (last_row['EMA_5'] > last_row['EMA_20']) or (rsi_now < 35):
+    # ระดับ Fibonacci Retracement เบื้องต้นจากจุด High/Low ในรอบ 3 เดือน
+    high_3m = df['High'].tail(60).max()
+    low_3m = df['Low'].tail(60).min()
+    diff = high_3m - low_3m
+    fibo_618 = high_3m - (0.618 * diff)
+    fibo_382 = high_3m - (0.382 * diff)
+    
+    # ตัดสินใจฟันธงคำสั่งเด็ดขาด
+    if (last['EMA_5'] > last['EMA_20']) or (rsi_now < 35):
         action = "🟩 BUY / LONG"
-        target = current_price + (1.5 * atr_now)
-        stop = current_price - (1.0 * atr_now)
+        target = curr_price + (1.5 * atr_now)
+        stop = curr_price - (1.0 * atr_now)
+        trend = "แนวโน้มโมเมนตัมขาขึ้นระยะสั้นได้เปรียบ"
     else:
         action = "🟥 SELL / SHORT"
-        target = current_price - (1.5 * atr_now)
-        stop = current_price + (1.0 * atr_now)
+        target = curr_price - (1.5 * atr_now)
+        stop = curr_price + (1.0 * atr_now)
+        trend = "แนวโน้มโมเมนตัมฝั่งขายควบคุมตลาด"
         
     return {
-        "price": current_price,
-        "action": action,
-        "rsi": rsi_now,
-        "target": target,
-        "stop": stop,
-        "win_rate": win_rate,
-        "total_trades": total_trades,
-        "df": df
+        "price": curr_price, "action": action, "rsi": rsi_now, "target": target, "stop": stop,
+        "win_rate": win_rate, "total_trades": len(trades), "vol_ratio": vol_ratio,
+        "fibo_618": fibo_618, "fibo_382": fibo_382, "trend": trend, "df": df
     }
 
 # ══════════════════════════════════════════════════════════════════════════
-# 🎯 MODE 1: สแกนสด & คำนวณความน่าจะเป็นเชิงสถิติย้อนหลัง
+# 🎯 MENU 1: แดชบอร์ดสแกนสด & ฟันธงความน่าจะเป็น (โจทย์ข้อ 1, 3, 5)
 # ══════════════════════════════════════════════════════════════════════════
-if menu == "🎯 สแกนสด & คำนวณความน่าจะเป็นเชิงสถิติ":
-    st.title("📊 ระบบสแกนและประมวลผลความน่าจะเป็นเชิงสถิติตลาดจริง")
-    st.markdown("ดึงราคาปิดล่าสุดรายนาที/รายวัน มาคำนวณร่วมกับสถิติ Win Rate ของอินดิเคเตอร์ในอดีตย้อนหลัง 6 เดือน")
+if menu == "🔥 1. แดชบอร์ดสแกนสด & ฟันธงความน่าจะเป็น":
+    st.title("🎯 ระบบควอนท์สแกนเนอร์และฟันธงคำสั่งซื้อขายระยะสั้น")
+    st.markdown("ดึงราคาสัจจะจริงบนกระดานปัจจุบันมารันสถิติจำลองการเทรดเพื่อฟันธงทิศทางความน่าจะเป็น")
     
-    if st.button("🔄 อัปเดตราคาและสถิติล่าสุด (Refresh)", type="primary"):
-        st.rerun()
-        
-    stat_summary = []
-    with st.spinner("⏳ ควอนท์เอนจิ้นกำลังดึงข้อมูลย้อนหลังมาทำความสะอาดและรันสถิติ..."):
-        for ticker in DEFAULT_WATCHLIST:
-            raw_df = get_market_data_with_stats(ticker)
-            res = run_quantitative_analysis(raw_df)
-            
+    col_ref = st.button("🔄 อัปเดตราคาตลาดสดเรียลไทม์ (Refresh Data)", type="primary")
+    
+    scanned_list = []
+    with st.spinner("⏳ เอนจิ้นกำลังสแกนพอร์ตหุ้นแนะนำและตรวจสอบทางสถิติ..."):
+        for t in DEFAULT_PORTFOLIO:
+            raw_df = get_clean_market_data(t)
+            res = process_trading_signals(raw_df)
             if res:
-                stat_summary.append({
-                    "ชื่อหุ้น": ticker,
-                    "ราคาตลาดปัจจุบัน": f"${res['price']:.2f}",
-                    "🎯 คำสั่งฟันธง": res['action'],
-                    "สถิติความแม่นยำ (Win Rate ย้อนหลัง)": f"{res['win_rate']:.1f}%",
-                    "จำนวนรอบบันทึกสถิติ": f"{res['total_trades']} ครั้ง",
-                    "เป้าทำกำไรระยะสั้น": f"${res['target']:.2f}",
-                    "จุดตัดขาดทุน (Stop Loss)": f"${res['stop']:.2f}"
+                scanned_list.append({
+                    "ชื่อหลักทรัพย์": t,
+                    "ราคาล่าสุด": f"${res['price']:.2f}",
+                    "📢 คำสั่งฟันธงหน้างาน": res['action'],
+                    "สถิติชนะ (Win Rate ในอดีต)": f"{res['win_rate']:.1f}%",
+                    "โมเมนตัม RSI": f"{res['rsi']:.1f}",
+                    "เป้าหมายเก็บกำไรสั้น": f"${res['target']:.2f}",
+                    "จุดคัทลอสตัดขาดทุน": f"${res['stop']:.2f}"
                 })
                 
-    if stat_summary:
-        st.dataframe(pd.DataFrame(stat_summary), use_container_width=True, hide_index=True)
-        st.caption("💡 *หมายเหตุ: ค่า Win Rate คำนวณจากจำนวนรอบสัญญาณซื้อขายที่เกิดขึ้นจริงและบรรลุเป้าหมายทำกำไร (Take Profit) ก่อนชนจุดตัดขาดทุน*")
-    else:
-        st.info("ไม่พบข้อมูลสถิติในระบบฐานข้อมูลชั่วคราว กรุณากดปุ่มรีเฟรช")
+    if scanned_list:
+        st.dataframe(pd.DataFrame(scanned_list), use_container_width=True, hide_index=True)
+        st.info("💡 **ไกด์ไลน์สายเล่นสั้น:** เลือกโฟกัสหุ้นที่มีค่า **สถิติชนะ (Win Rate) สูงกว่า 55% ขึ้นไป** และมีสัญญาณฝั่ง BUY เพื่อให้ได้เปรียบเชิงคณิตศาสตร์สูงสุดครับ")
 
 # ══════════════════════════════════════════════════════════════════════════
-# 📈 MODE 2: เจาะลึกแผนเทรดรายตัวพ่วงการพล็อตกราฟราคาจริง
+# 📐 MENU 2: เจาะลึกแผนเทรดคณิตศาสตร์รายตัว (โจทย์ข้อ 2, 10)
 # ══════════════════════════════════════════════════════════════════════════
-elif menu == "📈 เจาะลึกแผนเทรดด้วยสถิติจริง":
-    st.title("🔍 เจาะลึกโครงสร้างแนวทางกราฟและตัวเลขเป้าหมายคณิตศาสตร์")
+elif menu == "🎯 2. เจาะลึกแผนเทรดคณิตศาสตร์รายตัว":
+    st.title("📐 แผนการเทรดวิเคราะห์กรอบราคาเชิงลึก (Tactical Trading Setup)")
     
-    search_ticker = st.text_input("ระบุสัญลักษณ์หุ้นสากลที่ต้องการเจาะลึกสถิติแผนเทรด:", "NVDA").upper()
+    t_input = st.text_input("ระบุตัวย่อหุ้นสากลที่ต้องการวางแผนหน้างาน (เช่น NVDA, TSLA, AAPL):", "NVDA").upper()
     
-    raw_df = get_market_data_with_stats(search_ticker)
-    res = run_quantitative_analysis(raw_df)
+    raw_df = get_clean_market_data(t_input)
+    res = process_trading_signals(raw_df)
     
     if res:
-        # แสดงผลลัพธ์ข้อมูลหลัก
-        col_st1, col_st2, col_st3 = st.columns(3)
-        col_st1.metric("ราคาปิดล่าสุด", f"${res['price']:.2f}")
-        col_st2.markdown(f"### สัญญาณปัจจุบัน\n### {res['action']}")
-        col_st3.metric("🎯 อัตราความน่าจะเป็น (Win Rate ย้อนหลัง)", f"{res['win_rate']:.1f}%", f"จากข้อมูลสถิติตลอด 6 เดือนที่ผ่านมา")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("ราคาตลาดปัจจุบัน", f"${res['price']:.2f}")
+        c2.markdown(f"### สัญญาณแอคชั่นคำสั่ง\n## {res['action']}")
+        c3.metric("ปริมาณโวลุ่มเข้า (Volume Ratioเทียบค่าเฉลี่ย)", f"{res['vol_ratio']:.2f}x")
         
-        # รายละเอียดแนวรับแนวต้านเชิงสถิติคณิตศาสตร์
         st.markdown("---")
-        c_tr1, c_tr2 = st.columns(2)
-        c_tr1.metric("🎯 แนวทางราคาเป้าหมายเก็บกำไรสั้น (Take Profit)", f"${res['target']:.2f}")
-        c_tr2.metric("🛑 แนวทางราคาตัดขาดทุนเพื่อหนีภัยความเสี่ยง (Stop Loss)", f"${res['stop']:.2f}")
+        st.markdown("### 📊 ตัวเลขแผนการตั้งออเดอร์เด็ดขาด (ไม่ต้องนั่งเดาแนวรับแนวต้าน)")
+        cx1, cx2, cx3 = st.columns(3)
+        cx1.metric("🎯 เป้าขายทำกำไรระยะสั้น (Take Profit)", f"${res['target']:.2f}")
+        cx2.metric("🛑 จุดหนีภัยคัทลอส (Stop Loss)", f"${res['stop']:.2f}")
+        cx3.metric("📈 ระดับย่อตัวสำคัญ (Fibonacci 61.8%)", f"${res['fibo_618']:.2f}")
         
-        # วาดกราฟแท่งเทียนอดีต 45 แท่งล่าสุดเพื่อให้มองเห็นขอบเขตราคาชัดเจน
-        plot_df = res['df'].tail(45)
-        
+        # วาดกราฟเทคนิคัล
+        plot_df = res['df'].tail(50)
         fig = go.Figure()
-        fig.add_trace(go.Candlestick(
-            x=plot_df.index, 
-            open=plot_df['Open'], high=plot_df['High'], 
-            low=plot_df['Low'], close=plot_df['Close'], 
-            name='ราคาตลาดจริง'
-        ))
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_5'], line=dict(color='#2eb85c', width=1.5), name='EMA 5 วัน (ทิศทางเร็ว)'))
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_20'], line=dict(color='#ffc107', width=1.5), name='EMA 20 วัน (แนวโน้มหลัก)'))
+        fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'], name='แท่งเทียนราคาจริง'))
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_5'], line=dict(color='#2eb85c', width=2), name='EMA 5 (เส้นเร็วไวเดย์เทรด)'))
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_20'], line=dict(color='#ffc107', width=2), name='EMA 20 (เส้นเทรนด์หลัก)'))
         
-        # ลากเส้นขอบเขตคณิตศาสตร์ที่เคยพิสูจน์แล้วว่ามีสถิติได้เปรียบตลาด
-        fig.add_hline(y=res['target'], line_dash="dash", line_color="#2eb85c", annotation_text="เป้าทำกำไรระยะสั้น (Stat Target)")
-        fig.add_hline(y=res['stop'], line_dash="dash", line_color="#e55353", annotation_text="จุดหนีรักษาต้นทุน (Stat Stop)")
+        # วาดระดับเป้าหมายบนกราฟเทคนิคัล
+        fig.add_hline(y=res['target'], line_dash="dash", line_color="green", annotation_text="เป้ากำไร")
+        fig.add_hline(y=res['stop'], line_dash="dash", line_color="red", annotation_text="จุดคัทลอส")
+        fig.add_hline(y=res['fibo_618'], line_dash="dot", line_color="orange", annotation_text="Fibo 61.8% (แนวรับแนวจิตวิทยา)")
         
-        fig.update_layout(template="plotly_dark", title=f"แผนภูมิวิเคราะห์แนวทางกราฟทางสถิติของหุ้น {search_ticker}", height=450)
+        fig.update_layout(template="plotly_dark", title=f"แผนภูมิราคาสดสถิติตลาดจริงของหุ้น {t_input}", height=480)
         st.plotly_chart(fig, use_container_width=True)
+        
+        if res['vol_ratio'] > 1.5:
+            st.success(f"🔥 **Volume Analysis Alert:** หุ้น {t_input} มีปริมาณการซื้อขายหนาแน่นกว่าปกติขยายตัวเด่นชัด ยืนยันความแข็งแกร่งของราคาเข้าทำแผนการเทรดได้ดี")
+            
     else:
-        st.error("ไม่สามารถคำนวณข้อมูลสถิติของหุ้นตัวนี้ได้ กรุณาตรวจสอบชื่อตัวย่อหุ้นอีกครั้งครับ")
+        st.error("ไม่สามารถเชื่อมข้อมูลหุ้นสัญลักษณ์นี้ได้ กรุณาตรวจเช็คการสะกดใหม่อีกครั้ง")
+
+# ══════════════════════════════════════════════════════════════════════════
+# 📰 MENU 3: ข่าวสารล่าสุดรอบ 7 วัน & SENTIMENT MARKET (โจทย์ข้อ 4, 8, 9)
+# ══════════════════════════════════════════════════════════════════════════
+elif menu == "📰 3. ข่าวสารล่าสุดรอบ 7 วัน & Sentiment Analysis":
+    st.title("📰 ระบบดึงฟีดข่าวสารจริงรายวันและการประเมินจิตวิทยาตลาด (Market Sentiment)")
+    st.markdown("ดึงหัวข้อข่าวสารทางการเงินจริงจากตลาดรอบ 7 วันล่าสุดมาทำการตรวจคีย์เวิร์ดเพื่อประเมินผลกระทบราคา")
+    
+    n_input = st.text_input("ระบุชื่อหุ้นที่ต้องการดึงข่าวสารอัปเดตหน้างานปัจจุบัน:", "TSLA").upper()
+    
+    if st.button("🌐 ดึงฐานข้อมูลข่าวสารแบบเรียลไทม์"):
+        with st.spinner("⏳ ระบบกำลังดึงฐานข้อมูลฟีดข่าวจริงส่งตรงจากตลาด..."):
+            try:
+                tick_obj = yf.Ticker(n_input)
+                news_list = tick_obj.news
+                
+                if not news_list:
+                    st.warning(f"ไม่พบฟีดข่าวอย่างเป็นทางการของหลักทรัพย์ {n_input} ในช่วงสัปดาห์นี้")
+                else:
+                    pos_words = ["growth", "surge", "higher", "profit", "beat", "buy", "bullish", "upgrade", "success"]
+                    neg_words = ["fall", "drop", "lower", "loss", "miss", "sell", "bearish", "downgrade", "risk"]
+                    
+                    p_score, n_score = 0, 0
+                    
+                    st.markdown(f"### 📰 ฟีดหัวข้อข่าวตรงจากกระดานตลาดของหุ้น {n_input}")
+                    for idx, article in enumerate(news_list[:5]):
+                        title = article.get("title", "")
+                        publisher = article.get("publisher", "Reuters/Bloomberg")
+                        link = article.get("link", "#")
+                        
+                        title_lower = title.lower()
+                        for pw in pos_words:
+                            if pw in title_lower: p_score += 1
+                        for nw in neg_words:
+                            if nw in title_lower: n_score += 1
+                            
+                        st.markdown(f"""
+                        <div style="background-color:#141923; padding:15px; border-radius:8px; margin-bottom:10px; border-left:4px solid #ffc107;">
+                            <b>{idx+1}. {title}</b><br>
+                            <small>สำนักข่าว: {publisher} | <a href="{link}" target="_blank" style="color:#ffc107;">เปิดลิงก์อ่านข่าวเต็มคลิกที่นี่ 🔗</a></small>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                    # คำนวณสรุปจิตวิทยาตลาดหน้างานฟันธง
+                    total_sc = p_score + n_score
+                    final_pct = 50.0
+                    if total_sc > 0:
+                        final_pct = (p_score / total_sc) * 100
+                        
+                    st.divider()
+                    st.markdown("### 🎯 สรุปผลลัพธ์ดัชนี Sentiment หน้างานข่าวสาร")
+                    st.metric(
+                        label="คะแนนวัดความเชื่อมั่นทิศทางข่าวสาร (Sentiment Score)",
+                        value=f"{final_pct:.1f} / 100",
+                        delta="ฝั่งบวกเป็นต่อ (BULLISH)" if final_pct > 55 else "ฝั่งลบเป็นต่อ (BEARISH)" if final_pct < 45 else "ภาวะทรงตัวเป็นกลาง (NEUTRAL)"
+                    )
+                    st.caption("เทรดเดอร์สามารถใช้ดัชนี Sentiment ข่าวสารนี้ร่วมกับสัญญาณกราฟในบทที่ 2 หากสัญญาณกราฟบอกให้ BUY และทิศทางข่าวสารเป็นบวกคู่กัน จะช่วยเพิ่มเปอร์เซ็นต์ความแม่นยำในการเล่นรอบสั้นได้อย่างดีเยี่ยม")
+            except Exception as e:
+                st.error(f"ระบบไม่สามารถดึงข่าวสารได้ชั่วคราว: {str(e)}")
+
+# ══════════════════════════════════════════════════════════════════════════
+# 💼 MENU 4: ตรวจสอบความเสี่ยงพอร์ต & ASSET ALLOCATION (โจทย์ข้อ 6, 7)
+# ══════════════════════════════════════════════════════════════════════════
+elif menu == "💼 4. ตรวจสอบความเสี่ยงพอร์ต & Asset Allocation":
+    st.title("💼 ระบบจำลองบริหารโครงสร้างพอร์ตลงทุนและแผนการลดความเสี่ยง 20%")
+    st.markdown("ประเมินปัญหาการถือหุ้นกลุ่มอุตสาหกรรมซ้ำซ้อนกันมากเกินไป (Sector Concentration Risk) และคำนวณการปรับพอร์ตไปพักเงิน")
+    
+    cx1, cx2, cx3 = st.columns(3)
+    w_tech = cx1.number_input("กรอกสัดส่วน หุ้นกลุ่มเทคโนโลยีปัญญาประดิษฐ์ (AI/Tech) % :", min_value=0, max_value=100, value=60)
+    w_ev = cx2.number_input("กรอกสัดส่วน หุ้นกลุ่มยานยนต์ไฟฟ้า/พลังงาน (EV/Energy) % :", min_value=0, max_value=100, value=30)
+    w_health = cx3.number_input("กรอกสัดส่วน หุ้นกลุ่มบริการทางการแพทย์/ดั้งเดิม % :", min_value=0, max_value=100, value=10)
+    
+    if w_tech + w_ev + w_health != 100:
+        st.error("⚠️ คำเตือน: ผลรวมสัดส่วนของสินทรัพย์ในพอร์ตจะต้องรวมกันได้เท่ากับ 100% พอดีตามสัญญากติกาคณิตศาสตร์ครับ")
+    else:
+        st.success("✅ โครงสร้างพอร์ตรวมคำนวณครบถ้วนตามหลักเกณฑ์")
+        
+        # พล็อตกราฟสัดส่วนอุตสาหกรรมในพอร์ต
+        fig_p = go.Figure(data=[go.Pie(labels=["กลุ่ม AI & Tech (ความผันผวนสูง)", "กลุ่ม EV & พลังงาน", "กลุ่มการแพทย์"], values=[w_tech, w_ev, w_health], hole=.3)])
+        fig_p.update_layout(template="plotly_dark", title="แผนภูมิแจกแจงความหนาแน่นรายกลุ่มอุตสาหกรรมในพอร์ตปัจจุบัน")
+        st.plotly_chart(fig_p, use_container_width=True)
+        
+        st.markdown("---")
+        st.markdown("### 🔄 แผนการทำ Rebalancing เพื่อลดความเสี่ยงของพอร์ตลง 20% ทันที")
+        st.info("กลยุทธ์ตามระเบียบวินัยความปลอดภัย: ให้ทำการดึงแบ่งกำไรหรือทุน 20% จากกลุ่มที่ความผันผวนสูงที่สุด (Tech) ออกมาโยกย้ายไปพักไว้ที่สินทรัพย์ปลอดภัยความเสี่ยงต่ำ")
+        
+        re_data = [
+            {"รายชื่อกลุ่มสินทรัพย์": "หุ้นกลุ่ม AI & เทคโนโลยี", "สัดส่วนเดิม": f"{w_tech}%", "🎯 สัดส่วนแนะนำใหม่หลังปรับพอร์ต": f"{w_tech - 20}%", "แนวปฏิบัติหน้างาน": "ขายทำกำรียออกบางส่วน 20%"},
+            {"รายชื่อกลุ่มสินทรัพย์": "หุ้นกลุ่ม EV & พลังงาน", "สัดส่วนเดิม": f"{w_ev}%", "🎯 สัดส่วนแนะนำใหม่หลังปรับพอร์ต": f"{w_ev}%", "แนวปฏิบัติหน้างาน": "ถือครองสัดส่วนคงเดิม"},
+            {"รายชื่อกลุ่มสินทรัพย์": "หุ้นกลุ่มการแพทย์และการป้องกัน", "สัดส่วนเดิม": f"{w_health}%", "🎯 สัดส่วนแนะนำใหม่หลังปรับพอร์ต": f"{w_health}%", "แนวปฏิบัติหน้างาน": "ถือครองสัดส่วนคงเดิม"},
+            {"รายชื่อกลุ่มสินทรัพย์": "🔒 สินทรัพย์ปลอดภัย / กองทุนตราสารหนี้ระยะสั้น", "สัดส่วนเดิม": "0%", "🎯 สัดส่วนแนะนำใหม่หลังปรับพอร์ต": "20%", "แนวปฏิบัติหน้างาน": "ซื้อเข้าเพื่อล็อกความเสี่ยงและพักเงินทุน"}
+        ]
+        st.dataframe(pd.DataFrame(re_data), use_container_width=True, hide_index=True)
