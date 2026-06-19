@@ -4,20 +4,18 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime
 
-st.set_page_config(page_title="อาหวัง Pro Max v16.0 - Portfolio Core", layout="wide")
+st.set_page_config(page_title="อาหวัง Pro Max v16.1 - Portfolio Core", layout="wide")
 
 # ==========================================================================
 # 📊 1. PORTFOLIO HEAT & SESSION STATE JOURNAL
 # ==========================================================================
 if "trade_journal" not in st.session_state:
-    # สมมติฐานประวัติการเทรดจริงเพื่อใช้คำนวณ Kill Switch อัตโนมัติ
     st.session_state.trade_journal = [
         {"date": "2026-06-15", "ticker": "AMD", "pnl_r": -1.0},
         {"date": "2026-06-16", "ticker": "TSLA", "pnl_r": -1.0},
         {"date": "2026-06-17", "ticker": "AAPL", "pnl_r": 1.5},
     ]
 
-# ฟังก์ชันคำนวณสถิติจริงจาก Journal (นับยอดแพ้ติดกันจากท้ายตาราง)
 def calculate_consecutive_losses(journal):
     if not journal: return 0
     count = 0
@@ -29,7 +27,7 @@ def calculate_consecutive_losses(journal):
 current_consecutive_losses = calculate_consecutive_losses(st.session_state.trade_journal)
 
 # แผงควบคุมบริหารความเสี่ยงระดับหัวกะทิ (Sidebar)
-st.sidebar.markdown("## 🦅 อาหวัง Pro Max v16.0")
+st.sidebar.markdown("## 🦅 อาหวัง Pro Max v16.1")
 st.sidebar.markdown("### `Hedge Fund Risk Architecture`")
 st.sidebar.divider()
 
@@ -39,19 +37,18 @@ base_risk_pct = st.sidebar.slider("ความเสี่ยงพื้นฐ
 max_portfolio_heat = st.sidebar.slider("เพดานความเสี่ยงรวมพอร์ต (Max Open Risk %):", 3.0, 10.0, 5.0, 0.5)
 current_open_risk = st.sidebar.slider("ความเสี่ยงรวมของไม้ที่ถืออยู่ในปัจจุบัน (%):", 0.0, 7.0, 2.0, 0.5)
 
-# ระบบออโต้ Kill Switch จากโมดูล Journal
 st.sidebar.markdown("### 🛑 Automated Kill Switch")
-st.sidebar.write(f"จำนวนไม้ที่แพ้ติดกันปัจจุบัน (จาก Journal): **{current_consecutive_losses} ไม้**")
+st.sidebar.write(f"จำนวนไม้ที่แพ้ติดกันปัจจุบัน: **{current_consecutive_losses} ไม้**")
 
 kill_switch = False
 if current_consecutive_losses >= 4 or current_open_risk >= max_portfolio_heat:
     st.sidebar.error("🚨 ALERT: ระบบล็อกการซื้อขายถาวร (Heat เกิน หรือแพ้ติดกัน)")
     kill_switch = True
 
-menu = st.sidebar.radio("🧭 โหมดการทำงาน:", ["⚡ 1. สแกนสดระดับ PM", "📊 2. Backtest วินัยเหล็ก (Fixed Risk)"])
+menu = st.sidebar.radio("🧭 โหมดการทำงาน:", ["⚡ 1. สแกนสดระดับ PM (Interactive)", "📊 2. Backtest วินัยเหล็ก (Fixed Risk)"])
 
 # ==========================================================================
-# 📦 2. QUANT MATHEMATICAL ENGINE (EMA 3 เส้น & Advanced RS Score)
+# 📦 2. QUANT MATHEMATICAL ENGINE
 # ==========================================================================
 @st.cache_data(ttl=60)
 def fetch_clean_data(ticker, period="3y"):
@@ -62,159 +59,4 @@ def fetch_clean_data(ticker, period="3y"):
         return df
     except: return None
 
-def compute_v16_indicators(df, spy_ret_90=0.0):
-    if df is None or len(df) < 200: return None
-    df = df.copy()
-    
-    # 1. เงื่อนไขแนวโน้มแกร่งลึก (Stage 2 Filter ตามที่คุณชอบ)
-    df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
-    df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
-    df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
-    
-    # 2. ตัวชี้วัดโมเมนตัมและระยะเสี่ยง
-    df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
-    df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = df['EMA_12'] - df['EMA_26']
-    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    
-    # RSI
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
-    df['RSI'] = 100 - (100 / (1 + (gain / (loss + 1e-9)) + 1e-9))
-    
-    # ATR สำหรับคำนวณจุดคัทและขนาดยอดเงินเทรด
-    df['Prev_Close'] = df['Close'].shift(1)
-    tr = pd.DataFrame({
-        'tr1': df['High'] - df['Low'],
-        'tr2': (df['High'] - df['Prev_Close']).abs(),
-        'tr3': (df['Low'] - df['Prev_Close']).abs()
-    }).max(axis=1)
-    df['ATR'] = tr.ewm(span=14, adjust=False).mean()
-    df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
-    
-    # 3. คิดค่า Relative Strength Score รายตัวย้อนหลัง 90 วัน เพื่อส่งไปทำ Ranking
-    stock_ret_90 = (df['Close'].iloc[-1] - df['Close'].iloc[-90]) / (df['Close'].iloc[-90] + 1e-9)
-    df['Absolute_RS'] = stock_ret_90 - spy_ret_90
-    
-    return df
-
-# ==========================================================================
-# 📊 3. CORRECT RISK BACKTEST ENGINE (Priority #1 Fixed)
-# ==========================================================================
-def run_fixed_risk_backtest(df, initial_capital=100000, risk_pct=1.0):
-    if df is None or len(df) < 200: return None
-    
-    capital = initial_capital
-    in_pos = False
-    entry_p = 0
-    sl_p = 0
-    risk_amt = 0
-    shares_to_buy = 0
-    trades = []
-    
-    for i in range(200, len(df)):
-        row = df.iloc[i]
-        prev = df.iloc[i-1]
-        
-        # คัดกรองเงื่อนไข Stage 2 เต็มพิกัด
-        trend_aligned = (prev['Close'] > prev['EMA_20']) and (prev['EMA_20'] > prev['EMA_50']) and (prev['EMA_50'] > prev['EMA_200'])
-        setup_ok = trend_aligned and (prev['MACD'] > prev['Signal_Line']) and (50 <= prev['RSI'] <= 75)
-        
-        if not in_pos and setup_ok:
-            # คำนวณ Position Sizing ตามวินัยบริหารพอร์ตจริง ไม่สุ่มสี่สุ่มห้า All-In
-            in_pos = True
-            entry_p = row['Open']
-            sl_distance = prev['ATR'] * 2.0
-            sl_p = entry_p - sl_distance
-            
-            risk_amt = capital * (risk_pct / 100) # เงินจำกัดขาดทุนจริงต่อไม้
-            shares_to_buy = risk_amt / (sl_distance + 1e-9) # คำนวณจำนวนหุ้นจริงที่ซื้อได้
-            continue
-            
-        if in_pos:
-            # ระบบ Trailing Stop ด้วยราคา High ล่าสุด
-            trail_sl = row['High'] - (row['ATR'] * 2.0)
-            if trail_sl > sl_p: sl_p = trail_sl
-                
-            # เช็คจุดตัดขาดทุน/ทำกำไรระหว่างวัน
-            if row['Low'] <= sl_p:
-                in_pos = False
-                exit_p = min(row['Open'], sl_p)
-                
-                # สรุปผลกำไรขาดทุนจริงอิงตามจำนวนหุ้น (ไม่ใช่เอาเปอร์เซ็นต์ความเปลี่ยนแปลงคูณพอร์ตตรงๆ)
-                trade_pnl = (exit_p - entry_p) * shares_to_buy
-                capital += trade_pnl
-                r_multiple = trade_pnl / risk_amt
-                trades.append({"pnl": trade_pnl, "r_score": r_multiple, "capital": capital})
-                
-    if not trades: return None
-    df_tr = pd.DataFrame(trades)
-    win_rate = (len(df_tr[df_tr['pnl'] > 0]) / len(df_tr)) * 100
-    max_dd = ((df_tr['capital'].cummax() - df_tr['capital']) / df_tr['capital'].cummax()).max() * 100
-    
-    return {"win_rate": win_rate, "max_dd": max_dd, "final_bal": capital, "total_trades": len(df_tr)}
-
-# ==========================================================================
-# 🎯 4. MAIN INTERFACE CONTROLLER
-# ==========================================================================
-spy = fetch_clean_data("SPY", "1y")
-spy_ret_90 = (spy['Close'].iloc[-1] - spy['Close'].iloc[-90]) / spy['Close'].iloc[-90] if spy is not None else 0.0
-
-if menu == "⚡ 1. สแกนสดระดับ PM":
-    st.title("⚡ แผงควบคุมจัดลำดับผู้นำตลาด (อาหวัง Pro Max v16.0)")
-    
-    watchlist = ["NVDA", "PLTR", "AMD", "TSLA", "META", "AAPL"]
-    results = []
-    
-    for t in watchlist:
-        raw = fetch_clean_data(t, "1y")
-        df_p = compute_v16_indicators(raw, spy_ret_90)
-        
-        if df_p is not None:
-            last = df_p.iloc[-1]
-            
-            # คำนวณเกณฑ์คะแนนแบบแอดวานซ์ ดึงพลังของ RS Score เข้ามาร่วมคิดเกรดจริง
-            score = 0
-            is_stage_2 = (last['Close'] > last['EMA_20'] > last['EMA_50'] > last['EMA_200'])
-            if is_stage_2: score += 40
-            if last['MACD'] > last['Signal_Line']: score += 20
-            if 50 <= last['RSI'] <= 75: score += 20
-            
-            # 🔴 ดึงค่า RS Score เข้ามาบวกเพิ่มเพื่อแยกความแข็งแกร่งของหุ้นผู้นำตามไอเดียคุณ
-            rs_bonus = min(max(last['Absolute_RS'] * 100, 0), 20)
-            score += rs_bonus
-            
-            # จัดสรร Dynamic Risk ตามเกณฑ์ Portfolio Manager
-            dynamic_risk = base_risk_pct * 1.5 if score >= 80 else (base_risk_pct if score >= 60 else base_risk_pct * 0.5)
-            
-            # ระบบกลั่นกรองสัญญาณ
-            if kill_switch: signal = "🛑 LOCK SYSTEM"
-            elif score >= 65 and is_stage_2: signal = "🟢 BUY / LONG"
-            else: signal = "⬜ NO TRADE"
-                
-            results.append({
-                "Ticker": t, "คะแนน Quant": round(score, 1), "RS Bonus": round(rs_bonus, 1),
-                "ราคาสด": f"${last['Close']:.2f}", "สัญญาณวินัย": signal, "เสี่ยงต่อไม้": f"{dynamic_risk}%",
-                "ATR Trailing Stop": f"${last['Close'] - (last['ATR'] * 2.0):.2f}"
-            })
-            
-    st.dataframe(pd.DataFrame(results).sort_values(by="คะแนน Quant", ascending=False), use_container_width=True, hide_index=True)
-
-elif menu == "📊 2. Backtest วินัยเหล็ก (Fixed Risk)":
-    st.title("📊 ระบบทดสอบกลยุทธ์จำลองพอร์ตเสมือนจริง (Fixed Risk Engine)")
-    tk = st.text_input("ระบุชื่อหุ้นเทสย้อนหลัง 3 ปี:", "NVDA").upper().strip()
-    
-    if tk:
-        data = fetch_clean_data(tk, "3y")
-        proc = compute_v16_indicators(data, spy_ret_90)
-        stats = run_fixed_risk_backtest(proc, initial_capital=account_capital, risk_pct=base_risk_pct)
-        
-        if stats:
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Win Rate จริง", f"{stats['win_rate']:.1f}%")
-            m2.metric("Max Drawdown จริง", f"{stats['max_dd']:.1f}%")
-            m3.metric("จำนวนไม้เทรดทั้งหมด", f"{stats['total_trades']} ไม้")
-            m4.metric("เงินพอร์ตปลายทาง", f"{stats['final_bal']:,.2f} บาท")
-        else:
-            st.info("ไม่พบจังหวะเทรดตามระบบวินัยเหล็กในช่วง 3 ปีนี้ หรือข้อมูลระบบขัดข้อง")
+def compute_v16_indicators(
