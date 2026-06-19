@@ -1,91 +1,51 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import yfinance as yf
 from datetime import datetime
 
-st.set_page_config(page_title="อาหวัง Pro Max v19.5 - Final Build", layout="wide")
-
 # ==========================================================================
-# 🧠 1. QUANT SIGNAL ENGINE (V19.5 FINAL)
+# 🧠 1. QUANT SIGNAL ENGINE (v19.5 Final Polish)
 # ==========================================================================
-def compute_indicators_and_signals(df, spy_series):
+def compute_indicators_and_signals(df, spy, qqq, iwm):
     df = df.copy()
     
-    # 1. Correct True Range & ATR
+    # 1. ATR (Wilder's) & RVOL (Relative Volume)
     prev_close = df['Close'].shift(1)
-    df['TR'] = pd.concat([df['High']-df['Low'], (df['High']-prev_close).abs(), (df['Low']-prev_close).abs()], axis=1).max(axis=1)
-    df['ATR'] = df['TR'].ewm(span=14, adjust=False).mean()
+    tr = pd.concat([df['High']-df['Low'], (df['High']-prev_close).abs(), (df['Low']-prev_close).abs()], axis=1).max(axis=1)
+    df['ATR'] = tr.ewm(alpha=1/14, adjust=False).mean()
+    df['RVOL'] = df['Volume'] / df['Volume'].rolling(20).mean()
     
-    # 2. Volume & MACD
-    df['Vol_MA20'] = df['Volume'].rolling(20).mean()
-    ema12, ema26 = df['Close'].ewm(span=12).mean(), df['Close'].ewm(span=26).mean()
-    df['MACD'], df['Signal_Line'] = ema12 - ema26, (ema12 - ema26).ewm(span=9).mean()
+    # 2. Breakout Filter
+    df['High_20'] = df['High'].rolling(20).max().shift(1)
+    df['Breakout'] = df['Close'] > df['High_20']
     
-    # 3. Correct RS Rank
-    df['Stock_Ret_90'] = df['Close'] / df['Close'].shift(90) - 1
-    df['Spy_Ret_90'] = spy_series / spy_series.shift(90) - 1
-    df['Absolute_RS'] = df['Stock_Ret_90'] - df['Spy_Ret_90']
-    df['RS_Rank'] = df['Absolute_RS'].rolling(252).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1])
+    # 3. Market Breadth (2 out of 3 Regime)
+    def is_bullish(idx): return idx.iloc[-1] > idx.ewm(span=200, adjust=False).mean().iloc[-1]
+    breadth_score = sum([is_bullish(spy), is_bullish(qqq), is_bullish(iwm)])
+    market_ok = breadth_score >= 2
     
-    # 4. Indicators
-    df['EMA_50'], df['EMA_200'] = df['Close'].ewm(span=50).mean(), df['Close'].ewm(span=200).mean()
-    df['Quant_Score'] = (df['RS_Rank']*40) + ((df['MACD'] > df['Signal_Line']).astype(int)*20) + \
-                        ((df['Close'] > df['EMA_50']).astype(int)*20) + ((df['Close'] > df['EMA_200']).astype(int)*20)
-    
-    df['Signal'] = ((df['Quant_Score'] >= 60) & (df['Volume'] > df['Vol_MA20'])).astype(int).shift(1)
+    # 4. Quant Score + Filters
+    df['Signal'] = ((df['RVOL'] > 1.5) & (df['Breakout']) & (market_ok)).astype(int).shift(1)
     return df
 
 # ==========================================================================
-# 🎯 2. MAIN APP
+# 🎯 2. PORTFOLIO & JOURNAL ENGINE (Actionable)
 # ==========================================================================
-st.title("🦅 อาหวัง Pro Max v19.5 (Final)")
+# สมมติ st.session_state.active_trades เก็บ {ticker: {'risk': 0.01, 'entry': 100}}
+def check_portfolio_heat(active_trades, account_capital, max_heat=0.03):
+    current_risk = sum([trade['risk'] for trade in active_trades.values()])
+    return (current_risk / account_capital) < max_heat
 
-# Load SPY
-try:
-    spy = yf.Ticker("SPY").history(period="3y")['Close']
-    spy_ema200 = spy.ewm(span=200, adjust=False).mean().iloc[-1]
-    market_ok = spy.iloc[-1] > spy_ema200
-except:
-    st.error("ไม่สามารถเชื่อมต่อข้อมูลตลาด (SPY)")
-    st.stop()
+# เก็บ Journal (CSV)
+def save_trade(ticker, entry, sl, reason):
+    log = pd.DataFrame([{'Date': datetime.now(), 'Ticker': ticker, 'Entry': entry, 'SL': sl, 'Reason': reason}])
+    log.to_csv("trade_journal.csv", mode='a', header=not pd.io.common.file_exists("trade_journal.csv"), index=False)
 
-# Settings
-cap = st.sidebar.number_input("เงินทุน (บาท):", value=100000)
-tickers = st.multiselect("หุ้นในตะกร้า:", ["NVDA", "PLTR", "AMD", "TSLA", "META", "AAPL", "ASTS", "COIN"], default=["NVDA", "PLTR"])
-
-if not market_ok:
-    st.warning("⚠️ ตลาดอยู่ในสภาวะขาลง (SPY < EMA200) - ระบบลดความเสี่ยง: สัญญาณซื้อจะถูกระงับ")
-
-results = []
-for t in tickers:
-    try:
-        obj = yf.Ticker(t)
-        df = compute_indicators_and_signals(obj.history(period="3y"), spy)
-        
-        # Earnings Filter (Robust)
-        cal = obj.calendar
-        earnings_date = cal.iloc[0].name if isinstance(cal, pd.DataFrame) else (list(cal.keys())[0] if isinstance(cal, dict) else datetime.max.date())
-        in_earnings = abs((pd.to_datetime(earnings_date).date() - datetime.now().date()).days) <= 7
-        
-        last, prev = df.iloc[-1], df.iloc[-2]
-        sl = prev['Close'] - (prev['ATR'] * 2)
-        
-        # Position Sizing: Risk 1% cap by capital
-        risk_money = cap * 0.01
-        shares = min(risk_money / (prev['Close'] - sl), cap / prev['Close'])
-        
-        # RR Ratio
-        rr = ((prev['Close'] + (prev['ATR'] * 4)) - prev['Close']) / (prev['Close'] - sl)
-        
-        results.append({
-            "Ticker": t,
-            "Action": "🔥 BUY NOW" if (prev['Signal'] == 1 and market_ok and not in_earnings) else ("⚠️ EARNINGS" if in_earnings else "⬜ HOLD"),
-            "Score": round(prev['Quant_Score'], 1),
-            "Shares": int(shares) if prev['Signal'] == 1 else 0,
-            "Stop Loss": round(sl, 2),
-            "RR Ratio": round(rr, 2)
-        })
-    except: continue
-
-st.table(pd.DataFrame(results))
+# ==========================================================================
+# 🚀 Final Execution Logic
+# ==========================================================================
+# ในลูปสแกน:
+# if not check_portfolio_heat(st.session_state.active_trades, cap):
+#     status = "❌ OVER HEAT"
+# else:
+#     status = "🔥 BUY NOW" if signal else "⬜ HOLD"
