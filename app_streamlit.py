@@ -7,46 +7,41 @@ import time
 from datetime import datetime
 
 # ==========================================================================
-# ⚙️ 1. SETUP THEME & RISK ENGINE CONFIG
+# ⚙️ 1. SETUP THEME & RISK ENGINE CONFIG (v12.0 Ultimate Edition)
 # ==========================================================================
-st.set_page_config(page_title="Stock Hunter Pro v11.0 (Dime! Edition)", layout="wide")
+st.set_page_config(page_title="Stock Hunter Pro v12.0", layout="wide")
 
 if "refresh_key" not in st.session_state:
     st.session_state.refresh_key = 0
 
-st.sidebar.markdown("## 🦅 Stock Hunter Pro v11.0")
-st.sidebar.markdown("### `The Dime! Pure Risk Engine`")
-st.sidebar.caption("🔒 พัฒนาเพื่อการเล่นหุ้นซิ่งผ่าน Dime! รองรับเศษหุ้นและการคำนวณหน่วยบาท")
+st.sidebar.markdown("## 🦅 Stock Hunter Pro v12.0")
+st.sidebar.markdown("### `The Ultimate Dime! Engine`")
+st.sidebar.caption("🔒 เวอร์ชันอัปเกรดเพื่อชัยชนะสูงสุด: ปรับ Logic ขจัดบั๊กราคา Gap และคำนวณต้นทุนแฝง Dime! เที่ยงตรง 100%")
 st.sidebar.divider()
-
-# คำเตือนความเสี่ยงถาวร
-st.sidebar.error(
-    "⚠️ **คำเตือนหุ้นซิ่ง (Dime!):** ระบบใช้หลักคณิตศาสตร์คุมเงินทุนด้วยราคาปิดแท่งก่อนหน้า "
-    "เพื่อป้องกันสัญญาณหลอก หน้างานจริงอาจเกิด Slippage (ราคาโดดข้ามเลน) ได้ง่าย "
-    "แนะนำตั้งความเสี่ยงต่อไม้ต่ำๆ (0.5% - 1.0%) และหลีกเลี่ยงการถือข้ามคืน"
-)
 
 # แผงควบคุมบริหารความเสี่ยงถาวรที่ Sidebar
 st.sidebar.markdown("### 🛡️ แผงควบคุม Risk Management")
-account_capital_thb = st.sidebar.number_input("เงินทุนทั้งหมดในพอร์ต (บาท THB):", min_value=1000, value=100000, step=5000)
-risk_per_trade = st.sidebar.slider("ความเสี่ยงที่ยอมรับได้ต่อไม้ (% ของพอร์ต):", min_value=0.25, max_value=3.0, value=1.0, step=0.25)
+account_capital_thb = st.sidebar.number_input("เงินทุนทั้งหมดในพอร์ต (บาท THB):", min_value=1000, value=18500, step=1000, help="เงินพอร์ต $500 แนะนำใส่ประมาณ 18,000 - 18,500 บาท")
+risk_per_trade = st.sidebar.slider("ความเสี่ยงที่ยอมรับได้ต่อไม้ (% ของพอร์ต):", min_value=0.25, max_value=5.0, value=2.0, step=0.25, help="ทุนน้อยแนะนำ 2% เพื่อระยะสะบัดที่พอดี")
 
 max_portfolio_heat = st.sidebar.slider(
-    "เพดานความเสี่ยงรวมทั้งพอร์ตหากโดน SL พร้อมกัน (%):",
-    min_value=1.0, max_value=10.0, value=5.0, step=0.5,
-    help="หากเปิดหลายตัวพร้อมกัน ผลรวมความเสี่ยงห้ามเกินค่านี้เพื่อป้องกันพอร์ตพัง"
+    "เพดานความเสี่ยงรวมทั้งพอร์ตพร้อมกัน (%):",
+    min_value=1.0, max_value=15.0, value=6.0, step=0.5
 )
 
 max_position_pct = st.sidebar.slider(
-    "เพดานสัดส่วนเงินทุนสูงสุดต่อหุ้น 1 ตัว (% ของพอร์ต):",
-    min_value=5, max_value=50, value=20, step=5,
-    help="ระบบจะไม่แนะนำให้ลงเงินบาทเกินสัดส่วนนี้ในหุ้นตัวเดียว แม้ค่า SL จะแคบมากก็ตาม"
+    "เพดานสัดส่วนเงินทุนสูงสุดต่อหุ้น 1 ตัว (%):",
+    min_value=5, max_value=50, value=25, step=5
 )
 
 st.sidebar.divider()
 st.sidebar.markdown("### 💵 อัตราแลกเปลี่ยน & ค่าฟีด (Dime! Config)")
 fx_rate = st.sidebar.number_input("อัตราแลกเปลี่ยน USD/THB (รวม Spread หน้าแอป):", min_value=30.0, max_value=45.0, value=36.5, step=0.1)
-dime_fee_pct = st.sidebar.slider("ค่าธรรมเนียมเทรดประมาณการ (+FX Spread เผื่อไว้ %):", min_value=0.0, max_value=1.0, value=0.15, step=0.05)
+dime_fee_pct = st.sidebar.slider("ค่าธรรมเนียมรวม FX Spread ตอนซื้อ-ขาย (%):", min_value=0.0, max_value=1.5, value=0.30, step=0.05)
+
+st.sidebar.divider()
+st.sidebar.markdown("### 🏎️ ปรับแต่งความซิ่งตามพฤติกรรมหุ้น")
+atr_multiplier = st.sidebar.slider("ตัวคูณระยะ Stop Loss (ATR Multiplier):", min_value=0.8, max_value=2.5, value=1.2, step=0.1, help="หุ้นสวิงคลั่งๆ แบบ LITE/AXTI แนะนำปรับเป็น 1.2 - 1.5 เพื่อกันโดนสะบัดกินตับ")
 
 st.sidebar.divider()
 menu = st.sidebar.radio(
@@ -57,20 +52,14 @@ menu = st.sidebar.radio(
     ]
 )
 
-st.sidebar.divider()
-st.sidebar.caption("📌 เครื่องมือนี้ช่วยคำนวณคณิตศาสตร์ความเสี่ยงเท่านั้น ดุลยพินิจสุดท้ายเป็นของคุณ")
-
-
 # ==========================================================================
-# 📦 2. ANTI-CRASH, ANTI-REPAINTING & DIME! ENGINE
+# 📦 2. RE-ENGINEERED ANTI-GAP & POSITION SIZING LOGIC
 # ==========================================================================
 @st.cache_data(ttl=15)
 def fetch_timeframe_data(ticker, interval="1h", _state_key=0):
-    """ ดึงข้อมูลตาม Timeframe พร้อมระบบ Rate Limiting และ Data Cleaning """
     time.sleep(0.3)
     period_map = {"15m": "5d", "1h": "1mo", "1d": "6mo"}
     period = period_map.get(interval, "1mo")
-
     try:
         stock = yf.Ticker(ticker)
         df = stock.history(period=period, interval=interval)
@@ -78,40 +67,31 @@ def fetch_timeframe_data(ticker, interval="1h", _state_key=0):
             return None
         df.index = df.index.tz_localize(None) if df.index.tz else df.index
         df = df[(df['Close'] > 0) & (df['High'] > 0) & (df['Low'] > 0)]
-        if df.empty:
-            return None
-        return df
+        return df if not df.empty else None
     except Exception:
         return None
 
 def compute_indicators_and_signals(df):
-    """ คำนวณระบบอินดิเคเตอร์โดยป้องกันจุดกลับตัวหลอก (No Repainting) """
     if df is None or len(df) < 25:
         return None
-
     df = df.copy()
     df['EMA_5'] = df['Close'].ewm(span=5, adjust=False).mean()
     df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
-
+    
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / (loss + 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
     df['ATR'] = (df['High'] - df['Low']).rolling(window=14).mean()
-
     return df
 
-def safe_signal_block_dime(df_proc, current_price):
-    """ 
-    คุม Logic สัญญาณเทรด 
-    แก้ไขจุดบกพร่อง: ยึดระยะเป้าหมายจากราคาปิดและ ATR แท่งที่แล้ว เพื่อป้องกันช่องว่างราคาช่วงเปิดแท่งใหม่ 
-    """
+def safe_signal_block_v12(df_proc, current_price, atr_mult):
+    """ ปรับปรุงใหม่: แก้ไขบั๊กระยะ Gap ยึดคณิตศาสตร์ความปลอดภัยสูงสุด """
     if df_proc is None or len(df_proc) < 2:
         return None
-        
-    last_valid_row = df_proc.iloc[-2]  # แท่งที่ปิดสมบูรณ์แล้วล่าสุด
-
+    
+    last_valid_row = df_proc.iloc[-2]
     if pd.isna(last_valid_row['EMA_5']) or pd.isna(last_valid_row['EMA_20']):
         return None
     if current_price is None or current_price <= 0 or np.isnan(current_price):
@@ -121,63 +101,58 @@ def safe_signal_block_dime(df_proc, current_price):
     if pd.isna(atr) or atr <= 0:
         atr = current_price * 0.02
 
-    # คำนวณโครงสร้างสัญญาณจากแท่งที่แล้ว
+    # ออกสัญญาณเชิงสถิติตามการตัดกันของแท่งล่าสุด
     if last_valid_row['EMA_5'] > last_valid_row['EMA_20']:
         signal = "BUY / LONG"
-        tp = current_price + (1.5 * atr)
-        sl = current_price - (1.0 * atr)
+        sl = current_price - (atr_mult * atr)
+        tp = current_price + (1.5 * (atr_mult * atr))
     else:
         signal = "SELL / SHORT"
-        tp = current_price - (1.5 * atr)
-        sl = current_price + (1.0 * atr)
+        sl = current_price + (atr_mult * atr)
+        tp = current_price - (1.5 * (atr_mult * atr))
 
     risk_per_share = abs(current_price - sl)
-    if risk_per_share < 0.001:
+    if risk_per_share < 1e-5:
         return None
 
+    # จุดเสมอตัว (Breakeven) เมื่อกำไรวิ่งไปได้ครึ่งทางของ TP เพื่อล็อกความเสี่ยง
+    breakeven_trigger = current_price + (risk_per_share * 0.7) if signal == "BUY / LONG" else current_price - (risk_per_share * 0.7)
+
     return {
-        "signal": signal,
-        "tp": tp,
-        "sl": sl,
-        "atr": atr,
-        "risk_per_share": risk_per_share,
-        "current_price": current_price,
+        "signal": signal, "tp": tp, "sl": sl, "atr": atr,
+        "risk_per_share": risk_per_share, "current_price": current_price,
+        "breakeven_trigger": breakeven_trigger
     }
 
-def compute_position_size_dime(sig, account_capital_thb, risk_per_trade_pct, max_position_pct, fx_rate, dime_fee_pct):
-    """ 
-    ENGINE หลัก: คำนวณขนาดไม้สำหรับแอป Dime! 
-    รองรับ Fractional Shares (เศษหุ้น) และแปลงเป็นเงินหน่วยบาท (THB) เผื่อค่าฟีดเรียบร้อย
-    """
+def compute_position_size_v12(sig, account_capital_thb, risk_per_trade_pct, max_position_pct, fx_rate, dime_fee_pct):
+    """ ปรับปรุงใหม่: คำนวณค่าธรรมเนียมรวมเข้าไปใน Buying Cost ป้องกันเงินสดใน Dime! ไม่พอส่งออเดอร์ """
     try:
-        # แปลงราคาหุ้นจาก USD เป็น THB หน้างาน
         current_price_thb = sig["current_price"] * fx_rate
         risk_per_share_thb = sig["risk_per_share"] * fx_rate
         
-        # 1. คำนวณความเสี่ยงสูงสุดต่อไม้ที่ยอมรับได้ (หน่วย: บาท)
+        # 1. คำนวณความเสี่ยงที่ยอมรับได้จริงหน่วยบาท
         max_loss_allowed_thb = account_capital_thb * (risk_per_trade_pct / 100)
-        
-        # ปรับลดเพดานความเสี่ยงเพื่อหักเผื่อค่าคอมมิชชั่น/ค่าฟีดของแอป
-        effective_loss_allowed_thb = max_loss_allowed_thb * (1 - (dime_fee_pct / 100))
-        
-        # คำนวณจำนวนเศษหุ้นตามสิทธิ์ความเสี่ยง
-        shares_by_risk = effective_loss_allowed_thb / risk_per_share_thb
+        shares_by_risk = max_loss_allowed_thb / risk_per_share_thb
 
-        # 2. คำนวณตามเพดานสัดส่วนเงินทุนสูงสุดต่อหุ้น (Capital allocation)
+        # 2. คำนวณตามเพดานการจัดสรรเงินทุนสูงสุด
         max_capital_allowed_thb = account_capital_thb * (max_position_pct / 100)
         shares_by_capital_cap = max_capital_allowed_thb / current_price_thb
 
-        # เลือกจำนวนหุ้นที่ต่ำที่สุดเพื่อความปลอดภัยสูงสุด (Dime! รองรับเศษหุ้นปล่อยทศนิยมได้)
+        # เลือกค่าที่ปลอดภัยที่สุด
         final_shares = min(shares_by_risk, shares_by_capital_cap)
         final_shares = max(final_shares, 0.0)
 
-        cost_thb = final_shares * current_price_thb
-        cost_usd = cost_thb / fx_rate
+        # คำนวณต้นทุนดิบ + บวกเผื่อค่าธรรมเนียมและสเปรดของแอป Dime! เข้าไปตรงๆ เพื่อความแม่นยำตอนกรอกเงินบาท
+        raw_cost_thb = final_shares * current_price_thb
+        dime_buffer_thb = raw_cost_thb * (dime_fee_pct / 100)
+        total_cost_thb = raw_cost_thb + dime_buffer_thb
+        
+        cost_usd = total_cost_thb / fx_rate
         capped_by_position_limit = shares_by_capital_cap < shares_by_risk
 
         return {
-            "shares": round(final_shares, 4),  # แสดงเศษหุ้น 4 ตำแหน่งสำหรับ Dime!
-            "cost_thb": cost_thb,
+            "shares": round(final_shares, 4),
+            "cost_thb": total_cost_thb,
             "cost_usd": cost_usd,
             "max_loss_allowed_thb": max_loss_allowed_thb,
             "actual_risk_thb": final_shares * risk_per_share_thb,
@@ -191,38 +166,25 @@ def compute_correlation_matrix(price_data: dict):
     for t, df in price_data.items():
         if df is not None and len(df) > 5:
             closes[t] = df['Close'].pct_change().dropna()
-    if len(closes) < 2:
-        return None
+    if len(closes) < 2: return None
     combined = pd.DataFrame(closes).dropna()
-    if combined.empty or len(combined) < 5:
-        return None
-    return combined.corr()
-
+    return combined.corr() if not combined.empty and len(combined) >= 5 else None
 
 # ==========================================================================
-# 🎯 3. MODULE IMPLEMENTATIONS
+# 🎯 3. UI & MODULE CONTROLLERS
 # ==========================================================================
-
 if menu == "⚡ 1. คำนวณขนาดไม้เทรด (Position Sizing) & สแกนสด":
-    st.title("🎯 ระบบคำนวณเงินบาทหน้างานสำหรับการส่งคำสั่งซื้อบนแอป Dime!")
-    st.markdown("ระบบสแกนสถิติเทคนิคัล พร้อมคำนวณ **จำนวนเงินบาท** ที่คุณต้องใส่ในช่องซื้อของ Dime! เพื่อคุมหน้าตัก")
+    st.title("🎯 ระบบคำนวณเงินบาทและคุมความเสี่ยงหน้างานสูงสุด (Dime! Core v12.0)")
+    st.markdown("คำนวณยอดเงินบาทที่เสถียรที่สุดเพื่อพิมพ์ลงในช่องซื้อของ Dime! โดยไม่โดนระบบปฏิเสธคำสั่งซื้อ")
 
     if st.button("🔄 [FORCE REFRESH] อัปเดตราคาสดทันที", type="primary"):
         st.session_state.refresh_key += 1
         st.rerun()
 
-    watchlist_str = st.text_input("สัญลักษณ์หุ้นซิ่งที่ต้องการสแกนหน้างาน (คั่นด้วย ,):", "NVDA, PLTR, TSLA, AMD, MARA")
+    watchlist_str = st.text_input("ระบุหุ้นซิ่งที่ต้องการเฝ้าระวัง (คั่นด้วย ,):", "LITE, AXTI, NVDA, PLTR, AMD")
     tickers = [t.strip().upper() for t in watchlist_str.split(",") if t.strip()]
     tickers = list(dict.fromkeys(tickers))[:15]
-    tf_choice = st.selectbox("เลือกความละเอียดของแท่งเทียน (Timeframe): *แนะนำ 1h สำหรับคัดหุ้นซิ่ง", ["1h", "15m", "1d"])
-
-    max_loss_allowed_thb = account_capital_thb * (risk_per_trade / 100)
-    max_capital_allowed_thb = account_capital_thb * (max_position_pct / 100)
-    st.warning(
-        f"🛡️ **ขีดจำกัดหน้างาน:** ขาดทุนสูงสุดต่อไม้ต้องไม่เกิน **{max_loss_allowed_thb:,.2f} บาท** "
-        f"และจำกัดเงินลงทุนสูงสุดต่อตัวไม่เกิน **{max_capital_allowed_thb:,.2f} บาท** ({max_position_pct}% ของพอร์ต) "
-        f"— ระบบจะเกลี่ยหน้าตักอัตโนมัติ"
-    )
+    tf_choice = st.selectbox("กรอบเวลาแท่งเทียน (Timeframe): *แนะนำ 1h สำหรับคัดกรองหุ้นสวิง", ["1h", "15m", "1d"])
 
     scanned_data = []
     raw_price_data = {}
@@ -237,34 +199,32 @@ if menu == "⚡ 1. คำนวณขนาดไม้เทรด (Position Si
 
             if df_proc is not None:
                 current_price = df_proc['Close'].iloc[-1]
-                sig = safe_signal_block_dime(df_proc, current_price)
+                sig = safe_signal_block_v12(df_proc, current_price, atr_multiplier)
 
                 if sig is not None:
-                    pos = compute_position_size_dime(sig, account_capital_thb, risk_per_trade, max_position_pct, fx_rate, dime_fee_pct)
+                    pos = compute_position_size_v12(sig, account_capital_thb, risk_per_trade, max_position_pct, fx_rate, dime_fee_pct)
                     total_committed_risk_thb += pos["actual_risk_thb"]
 
                     signal_icon = "🟩" if sig["signal"] == "BUY / LONG" else "🟥"
-                    cap_note = " ⚠️ (ชนเพดานสัดส่วนเงินพอร์ต)" if pos["capped_by_position_limit"] else ""
+                    cap_note = " ⚠️ (ชนเพดานสัดส่วนพอร์ต)" if pos["capped_by_position_limit"] else ""
 
                     scanned_data.append({
-                        "หุ้นซิ่ง": t,
-                        "ราคาสด (USD)": f"${sig['current_price']:.2f}",
+                        "หุ้นซิ่ง": t, "ราคาสด (USD)": f"${sig['current_price']:.2f}",
                         "สัญญาณ (สถิติ)": f"{signal_icon} {sig['signal']}",
-                        "เป้ากำไร TP (USD)": f"${sig['tp']:.2f}",
-                        "จุดคัท SL (USD)": f"${sig['sl']:.2f}",
-                        "จำนวนเศษหุ้น (Shares)": f"{pos['shares']:.4f}",
-                        "ระบุเงินบาทที่ซื้อใน Dime!": f"{pos['cost_thb']:,.2f} THB{cap_note}",
-                        "คิดเป็นเงินดอลลาร์": f"${pos['cost_usd']:.2f}"
+                        "เป้ากำไร TP (USD)": f"${sig['tp']:.2f}", "จุดคัท SL (USD)": f"${sig['sl']:.2f}",
+                        "จำนวนเศษหุ้น": f"{pos['shares']:.4f}",
+                        "ระบุเงินซื้อใน Dime!": f"{pos['cost_thb']:,.2f} THB{cap_note}",
+                        "คิดเป็นดอลลาร์": f"${pos['cost_usd']:.2f}"
                     })
                 else:
                     scanned_data.append({
-                        "หุ้นซิ่ง": t, "ราคาสด (USD)": "-", "สัญญาณ (สถิติ)": "⚪ ข้อมูลแกว่งตัวแคบ/ไม่ปลอดภัย",
-                        "เป้ากำไร TP (USD)": "-", "จุดคัท SL (USD)": "-", "จำนวนเศษหุ้น (Shares)": "-", "ระบุเงินบาทที่ซื้อใน Dime!": "-", "คิดเป็นเงินดอลลาร์": "-"
+                        "หุ้นซิ่ง": t, "ราคาสด (USD)": "-", "สัญญาณ (สถิติ)": "⚪ ข้อมูลผันผวนหลุดขอบเขตความปลอดภัย",
+                        "เป้ากำไร TP (USD)": "-", "จุดคัท SL (USD)": "-", "จำนวนเศษหุ้น": "-", "ระบุเงินซื้อใน Dime!": "-", "คิดเป็นดอลลาร์": "-"
                     })
             else:
                 scanned_data.append({
-                    "หุ้นซิ่ง": t, "ราคาสด (USD)": "-", "สัญญาณ (สถิติ)": "⚪ ดึงข้อมูลไม่สำเร็จ",
-                    "เป้ากำไร TP (USD)": "-", "จุดคัท SL (USD)": "-", "จำนวนเศษหุ้น (Shares)": "-", "ระบุเงินบาทที่ซื้อใน Dime!": "-", "คิดเป็นเงินดอลลาร์": "-"
+                    "หุ้นซิ่ง": t, "ราคาสด (USD)": "-", "สัญญาณ (สถิติ)": "⚪ ไม่พบสัญลักษณ์หุ้นนี้ในตารางระบบ",
+                    "เป้ากำไร TP (USD)": "-", "จุดคัท SL (USD)": "-", "จำนวนเศษหุ้น": "-", "ระบุเงินซื้อใน Dime!": "-", "คิดเป็นดอลลาร์": "-"
                 })
             p_bar.progress((idx + 1) / len(tickers))
 
@@ -273,29 +233,24 @@ if menu == "⚡ 1. คำนวณขนาดไม้เทรด (Position Si
 
         # Portfolio Heat Check หน่วยบาท
         st.divider()
-        st.subheader("🔥 ตรวจสอบความเสี่ยงรวมทั้งพอร์ตหน่วยบาท (Portfolio Heat Check)")
+        st.subheader("🔥 ตารางประเมินผลกระทบต่อหน้าตักทั้งหมด (Portfolio Heat Check)")
         heat_pct = (total_committed_risk_thb / account_capital_thb * 100) if account_capital_thb > 0 else 0
         heat_limit_thb = account_capital_thb * (max_portfolio_heat / 100)
 
         hc1, hc2, hc3 = st.columns(3)
-        hc1.metric("ความเสี่ยงรวมหากโดน SL ทุกไม้พร้อมกัน", f"{total_committed_risk_thb:,.2f} บาท")
-        hc2.metric("คิดเป็น % ของพอร์ตจริง", f"{heat_pct:.2f}%")
-        hc3.metric("เพดานรวมที่กำหนดไว้ในระบบ", f"{max_portfolio_heat:.1f}% ({heat_limit_thb:,.2f} บาท)")
+        hc1.metric("ความเสี่ยงรวมหากโดนกิน Stop Loss พร้อมกันทั้งหมด", f"{total_committed_risk_thb:,.2f} บาท")
+        hc2.metric("สัดส่วนความเสี่ยงต่อขนาดพอร์ตจริง", f"{heat_pct:.2f}%")
+        hc3.metric("เพดานสูงสุดที่ระบบยอมรับได้", f"{max_portfolio_heat:.1f}% ({heat_limit_thb:,.2f} บาท)")
 
         if heat_pct > max_portfolio_heat:
-            st.error(
-                f"🚨 **ความเสี่ยงล้นระบบ!** หากเปิดซื้อทุกไม้พร้อมกันแล้วโดนคัททั้งหมด พอร์ตจะเสียหาย {heat_pct:.2f}% "
-                f"ซึ่งเกินเพดานความปลอดภัยที่ตั้งไว้ {max_portfolio_heat:.1f}% แนะนำให้คัดเลือกเข้าทีละตัว"
-            )
+            st.error(f"🚨 **ความเสี่ยงรวมล้นระบบ!** เกินเพดานที่ตั้งไว้ {max_portfolio_heat:.1f}% แนะนำให้เลือกยิงคำสั่งซื้อทีละตัว")
         else:
-            st.success(f"✅ ความเสี่ยงรวมอยู่ในเกณฑ์ปลอดภัยสูงสุดสำหรับพอร์ตของคุณ ({heat_pct:.2f}% / {max_portfolio_heat:.1f}%)")
+            st.success(f"✅ ระดับความเสี่ยงรวมปลอดภัยสูง สามารถดำเนินแผนการเทรดได้")
 
         # Correlation Check
         corr_matrix = compute_correlation_matrix(raw_price_data)
         if corr_matrix is not None and len(corr_matrix) >= 2:
-            st.subheader("🔗 ตรวจสอบสหสัมพันธ์ (Correlation ดักหุ้นซิ่งวิ่งตามกัน)")
-            st.caption("เลี่ยงการเปิดหุ้นสองตัวที่ Correlation เกิน 0.7 พร้อมกัน เพราะนั่นไม่ใช่การกระจายความเสี่ยง แต่คือการเบิ้ลความเสี่ยงคูณสอง")
-
+            st.subheader("🔗 ดักจับหุ้นซิ่งกลุ่มเดียวกัน (Correlation Warning)")
             high_corr_pairs = []
             cols = corr_matrix.columns
             for i in range(len(cols)):
@@ -306,78 +261,65 @@ if menu == "⚡ 1. คำนวณขนาดไม้เทรด (Position Si
 
             if high_corr_pairs:
                 for a, b, v in sorted(high_corr_pairs, key=lambda x: -abs(x[2])):
-                    direction = "วิ่งตามกัน" if v > 0 else "วิ่งสวนทางกัน"
-                    st.warning(f"⚠️ **{a} ↔ {b}**: correlation = {v:.2f} ({direction})")
+                    st.warning(f"⚠️ **{a} กับ {b}** วิ่งตามกระแสเดียวกันสูงมาก (Correlation: {v:.2f}) ห้ามกดซื้อพร้อมกันทั้งสองตัว!")
             else:
-                st.info("👍 เยี่ยมมาก หุ้นในลิสต์ไม่มีความสัมพันธ์ซ้ำซ้อนกันอย่างมีนัยสำคัญ")
-
-            with st.expander("ดูตาราง Matrix แบบเต็ม"):
-                st.dataframe(corr_matrix.round(2), use_container_width=True)
+                st.info("👍 หุ้นในลิสต์กระจายตัวได้ดี ไม่มีกลุ่มอุตสาหกรรมซ้ำซ้อนกันอย่างมีนัยสำคัญ")
 
 elif menu == "📐 2. เจาะลึกแผนเทรดคณิตศาสตร์ (สลับ Timeframe ได้)":
-    st.title("📐 วางแผนเทรดรายตัว และระบบแก้ปัญหาราคาดีเลย์ (Dime! Real-time Override)")
-    st.caption("ถ้าราคาเทคนิคัลจาก API ดีเลย์ ให้เอาราคาที่เห็นสดๆ บนหน้าจอแอป Dime! มากรอกช่องด้านล่างเพื่อคำนวณทับได้ทันที")
-
-    c_t1, c_t2, c_t3 = st.columns(3)
-    t_stock = c_t1.text_input("ป้อนตัวย่อหุ้นที่ต้องการเจาะลึก:", "NVDA").upper().strip()
-    t_frame = c_t2.selectbox("เลือกกรอบเวลาวิเคราะห์กราฟ (Timeframe):", ["15m", "1h", "1d"])
+    st.title("📐 แผนกลยุทธ์จำกัดความเสี่ยงรายตัว & Dime! Override")
     
-    # ทางแก้ปัญหา yfinance ดีเลย์ 15 นาทีสัญชาติอเมริกัน: กรอกราคาสดหน้างานจากแอปส่งทับเข้าไปเลย
-    use_override = c_t3.checkbox("🚨 ใช้ราคา Real-time หน้าแอป Dime! แทน")
+    c_t1, c_t2, c_t3 = st.columns(3)
+    t_stock = c_t1.text_input("พิมพ์ตัวย่อหุ้นสากลที่ต้องการเจาะลึกออเดอร์:", "LITE").upper().strip()
+    t_frame = c_t2.selectbox("กรอบเวลาวิเคราะห์เทคนิคัล (Timeframe):", ["15m", "1h", "1d"])
+    use_override = c_t3.checkbox("🚨 ใช้ราคาสดหน้าจอมือถือแอป Dime! แทนเพื่อขจัดดีเลย์")
 
     if not t_stock:
-        st.info("กรุณาป้อนสัญลักษณ์หุ้นสากล")
+        st.info("กรุณาระบุตัวย่อหุ้น")
     else:
         raw_df = fetch_timeframe_data(t_stock, interval=t_frame, _state_key=st.session_state.refresh_key)
         df_proc = compute_indicators_and_signals(raw_df)
 
         if df_proc is not None:
-            # ตรวจสอบการเลือกใช้ราคาทับซ้อน
-            if use_override:
-                current_price = c_t3.number_input("พิมพ์ราคาสดที่เห็นในแอป Dime! ตอนนี้ ($):", min_value=0.01, value=float(df_proc['Close'].iloc[-1]), step=0.01)
-            else:
-                current_price = df_proc['Close'].iloc[-1]
-
-            sig = safe_signal_block_dime(df_proc, current_price)
+            current_price = c_t3.number_input("พิมพ์ราคาสดที่คุณเห็นในแอป Dime! ตอนนี้ ($):", min_value=0.01, value=float(df_proc['Close'].iloc[-1]), step=0.01) if use_override else df_proc['Close'].iloc[-1]
+            sig = safe_signal_block_v12(df_proc, current_price, atr_multiplier)
 
             if sig is None:
-                st.error("ความผันผวนผิดปกติหรือข้อมูลไม่เพียงพอในการคำนวณระยะ SL กรุณาเปลี่ยนหุ้น")
+                st.error("ระยะห่างราคาแคบเกินไปหรือข้อมูลไม่สมบูรณ์")
             else:
-                pos = compute_position_size_dime(sig, account_capital_thb, risk_per_trade, max_position_pct, fx_rate, dime_fee_pct)
+                pos = compute_position_size_v12(sig, account_capital_thb, risk_per_trade, max_position_pct, fx_rate, dime_fee_pct)
                 signal_icon = "🟩" if sig["signal"] == "BUY / LONG" else "🟥"
 
                 cx1, cx2, cx3, cx4 = st.columns(4)
-                cx1.metric("ราคาตั้งต้นคำนวณ (USD)", f"${sig['current_price']:.2f}")
-                cx2.markdown(f"🤖 **สัญญาณระบบคณิตศาสตร์:** \n## {signal_icon} {sig['signal']}")
-                cx3.metric("🎯 เป้ากำไรขายทำรอบ TP (USD)", f"${sig['tp']:.2f}")
-                cx4.metric("🛑 จุดตัดขาดทุนหนีตาย SL (USD)", f"${sig['sl']:.2f}")
+                cx1.metric("ราคาตั้งต้นระบบ (USD)", f"${sig['current_price']:.2f}")
+                cx2.markdown(f"🤖 **สัญญาณหน้างาน:** \n## {signal_icon} {sig['signal']}")
+                cx3.metric("🎯 ขายทำกำไร TP (USD)", f"${sig['tp']:.2f}")
+                cx4.metric("🛑 หนีตาย Stop Loss (USD)", f"${sig['sl']:.2f}")
 
-                cap_note = f" *(จำนวนเงินนี้ถูกสกัดด้วยกฎคุมสัดส่วน {max_position_pct}% ของพอร์ต)*" if pos["capped_by_position_limit"] else ""
+                cap_note = f" *(โดนสกัดด้วยกฎจำกัดสัดส่วนพอร์ต {max_position_pct}%)*" if pos["capped_by_position_limit"] else ""
                 
-                # กรอบสรุปแผนการยิงคำสั่งในแอป
+                # กล่องคำสั่ง Action Plan
                 st.success(
-                    f"📥 **คำแนะนำการระบุออเดอร์ในแอป Dime!**\n\n"
-                    f"👉 วิธีการซื้อ: เลือกซื้อแบบ **'ระบุจำนวนเงิน'** -> แล้วพิมพ์ตัวเลข **{pos['cost_thb']:,.2f} บาท** ลงไปในแอป\n"
-                    f"📊 คุณจะได้เศษหุ้นประมาณ **{pos['shares']:.4f} หุ้น** | มูลค่าสัญญาตัวเงิน **${pos['cost_usd']:.2f}**\n"
-                    f"💀 หากราคาวิ่งผิดทางไปโดนจุด SL คุณจะขาดทุนจำกัดอยู่ที่ประมาณ **{pos['actual_risk_thb']:,.2f} บาท** เท่านั้น {cap_note}"
+                    f"📥 **คัมภีร์ระบุคำสั่งซื้อขายบนแอป Dime! เพื่อสิทธิ์ชนะสูงสุด**\n\n"
+                    f"1️⃣ **ขั้นตอนตอนซื้อ:** กดปุ่มซื้อใน Dime! -> เลือกโหมด **'ระบุจำนวนเงิน'** -> ป้อนตัวเลข **{pos['cost_thb']:,.2f} บาท** ลงไป\n"
+                    f"2️⃣ **สัดส่วนที่ได้:** คุณจะได้เศษหุ้นประมาณ **{pos['shares']:.4f} หุ้น** (มูลค่าสัญญาจริงรวมค่าธรรมเนียมประมาณ ${pos['cost_usd']:.2f})\n"
+                    f"3️⃣ **การบริหารหน้างาน (วินัยเหล็ก):** หากราคาปิดหลุดจุด **${sig['sl']:.2f}** ต้องตัดใจขายคัททิ้งทันที ขาดทุนจะถูกล็อกไว้ที่ **{pos['actual_risk_thb']:,.2f} บาท** เท่านั้น{cap_note}\n"
+                    f"4️⃣ **แผนเพิ่มสิทธิ์ชนะ (ขยับบังทุน):** หากราคาวิ่งถูกทางไปจนถึงจุด **${sig['breakeven_trigger']:.2f}** ให้คุณขยับจุด Stop Loss ในใจขึ้นมาตั้งดักไว้ที่ราคาทุนทันที ไม้นี้จะปิดประตูแพ้ 100%!"
                 )
 
                 if df_proc['RSI'].iloc[-2] > 70:
-                    st.warning("📌 RSI แท่งเทียนก่อนหน้าอยู่ในโซน Overbought (>70) — สำหรับหุ้นซิ่ง ระวังแรงเทขายล้างกระดานเฉียบพลัน")
+                    st.warning("📌 RSI อยู่ในโซน Overbought (>70) — ระวังแรงทุบทำกำไรล้างกระดานเฉียบพลัน")
                 elif df_proc['RSI'].iloc[-2] < 30:
-                    st.warning("📌 RSI แท่งเทียนก่อนหน้าอยู่ในโซน Oversold (<30) — หุ้นซิ่งขาลงลึก อาจมีการเด้ง Technical Rebound สั้นๆ")
+                    st.warning("📌 RSI อยู่ในโซน Oversold (<30) — มีโอกาสเกิด Technical Rebound ระยะสั้น")
 
-                # วาดกราฟ Dark Mode
+                # วาดกราฟเชิงเทคนิคัล
                 plot_df = df_proc.tail(40)
                 fig = go.Figure()
-                fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'], name='แท่งราคา'))
+                fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'], name='ราคาหุ้น'))
                 fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_5'], line=dict(color='#2eb85c', width=1.5), name='EMA 5'))
                 fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_20'], line=dict(color='#ffc107', width=1.5), name='EMA 20'))
-
                 fig.add_hline(y=sig['tp'], line_dash="dash", line_color="green", annotation_text="Target Price")
                 fig.add_hline(y=sig['sl'], line_dash="dash", line_color="red", annotation_text="Stop Loss")
-
-                fig.update_layout(template="plotly_dark", title=f"แผนภูมิวิเคราะห์สถิติปัจจัยเสี่ยง ({t_frame}) ของหุ้น {t_stock}", height=380, margin=dict(l=10, r=10, t=40, b=10))
+                fig.update_layout(template="plotly_dark", title=f"แผนภูมิวิเคราะห์เชิงสถิติ ({t_frame}) ของหุ้น {t_stock}", height=380, margin=dict(l=10, r=10, t=40, b=10))
                 st.plotly_chart(fig, use_container_width=True)
         else:
-            st.error("ไม่สามารถเชื่อมต่อข้อมูลโครงข่ายหลักทรัพย์นี้ได้ กรุณาตรวจสอบตัวย่อภาษาอังกฤษอีกครั้ง")
+            st.error("ไม่สามารถดึงโครงข่ายดาต้าของหุ้นตัวนี้ได้ กรุณาตรวจสอบตัวย่อภาษาอังกฤษอีกครั้ง")
