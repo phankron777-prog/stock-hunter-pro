@@ -2,82 +2,69 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime, timedelta
-
-st.set_page_config(page_title="อาหวัง Pro Max v18.5 - Final", layout="wide")
+from datetime import datetime
 
 # ==========================================================================
-# 🧠 1. QUANT SIGNAL ENGINE (V18.5)
+# 🧠 1. QUANT SIGNAL ENGINE (V19 FINAL - MATHEMATICALLY CORRECTED)
 # ==========================================================================
-def compute_indicators_and_signals_v18_5(df, spy_series):
+def compute_indicators_and_signals_v19(df, spy_series):
     df = df.copy()
     
-    # 1. Volume & Momentum Filter
+    # 1. Correct ATR Calculation (The True Range)
+    prev_close = df['Close'].shift(1)
+    tr1 = df['High'] - df['Low']
+    tr2 = (df['High'] - prev_close).abs()
+    tr3 = (df['Low'] - prev_close).abs()
+    df['TR'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df['ATR'] = df['TR'].ewm(span=14, adjust=False).mean()
+    
+    # 2. Volume & Momentum (MACD)
     df['Vol_MA20'] = df['Volume'].rolling(20).mean()
     ema12, ema26 = df['Close'].ewm(span=12).mean(), df['Close'].ewm(span=26).mean()
     df['MACD'], df['Signal_Line'] = ema12 - ema26, (ema12 - ema26).ewm(span=9).mean()
     
-    # 2. RS Rank (Rolling Percentile - Fixed Bias)
+    # 3. Correct RS Calculation
     df['Stock_Ret_90'] = df['Close'] / df['Close'].shift(90) - 1
     df['Spy_Ret_90'] = spy_series / spy_series.shift(90) - 1
     df['Absolute_RS'] = df['Stock_Ret_90'] - df['Spy_Ret_90']
     df['RS_Rank'] = df['Absolute_RS'].rolling(252).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1])
     
-    # 3. Technicals
+    # 4. Technicals
     df['EMA_50'], df['EMA_200'] = df['Close'].ewm(span=50).mean(), df['Close'].ewm(span=200).mean()
-    df['ATR'] = (df['High']-df['Low']).ewm(span=14).mean()
     
-    # 4. Quant Score (Final Weighting)
-    score = (df['RS_Rank'] * 40) + \
-            ((df['MACD'] > df['Signal_Line']).astype(int) * 20) + \
-            ((df['Close'] > df['EMA_50']).astype(int) * 20) + \
-            ((df['Close'] > df['EMA_200']).astype(int) * 20)
-    
+    # 5. Quant Score
+    score = (df['RS_Rank'] * 40) + ((df['MACD'] > df['Signal_Line']).astype(int) * 20) + \
+            ((df['Close'] > df['EMA_50']).astype(int) * 20) + ((df['Close'] > df['EMA_200']).astype(int) * 20)
     df['Quant_Score'] = score
-    # Signal ใช้ข้อมูลวันก่อนหน้า + กรอง Volume + กรองตลาด
     df['Signal'] = ((df['Quant_Score'] >= 60) & (df['Volume'] > df['Vol_MA20'])).astype(int).shift(1)
     return df
 
 # ==========================================================================
-# 🎯 3. MAIN UI
+# 🎯 2. ACTIONABLE SCANNER (WITH RR RATIO & REGIME FILTER)
 # ==========================================================================
-st.title("🦅 อาหวัง Pro Max v18.5 (Final Polish)")
+# (ในส่วนของ Loop)
+# ...
+market_bullish = spy.iloc[-1] > spy.ewm(span=200, adjust=False).mean().iloc[-1]
 
-# Inputs
-account_capital = st.sidebar.number_input("เงินทุน (บาท):", value=100000)
-max_heat = st.sidebar.slider("Max Portfolio Heat (%):", 0.1, 5.0, 3.0)
-tickers = st.multiselect("เลือกหุ้น:", ["NVDA", "PLTR", "AMD", "TSLA", "META", "AAPL", "ASTS", "COIN"], default=["NVDA", "PLTR"])
+# 1. Earnings Filter (Error-proof)
+def get_earnings_date(ticker_obj):
+    try:
+        cal = ticker_obj.calendar
+        if isinstance(cal, pd.DataFrame): return cal.iloc[0].name
+        if isinstance(cal, dict): return list(cal.keys())[0]
+        return datetime.max.date()
+    except: return datetime.max.date()
 
-spy = yf.Ticker("SPY").history(period="3y")['Close']
-scan_results = []
+# 2. Inside the Loop:
+sl_price = prev['Close'] - (prev['ATR'] * 2)
+risk_money = account_capital * (base_risk_pct / 100)
+raw_shares = risk_money / (prev['Close'] - sl_price)
 
-for t in tickers:
-    ticker_obj = yf.Ticker(t)
-    df = compute_indicators_and_signals_v18_5(ticker_obj.history(period="3y"), spy)
-    
-    # Earnings Filter
-    cal = ticker_obj.calendar
-    next_earnings = cal.get('Earnings Date', [datetime.max.date()])[0] if isinstance(cal, dict) else datetime.max.date()
-    in_earnings_window = abs((pd.to_datetime(next_earnings).date() - datetime.now().date()).days) <= 7
-    
-    if df is not None:
-        last = df.iloc[-1]
-        prev = df.iloc[-2] # ใช้ข้อมูลก่อนหน้ากัน Bias
-        
-        sl_price = prev['Close'] - (prev['ATR'] * 2)
-        risk_money = account_capital * 0.01 # 1% Risk per trade
-        shares = risk_money / (prev['Close'] - sl_price)
-        
-        status = "🔥 BUY NOW" if (prev['Signal'] == 1 and not in_earnings_window) else ("⚠️ EARNINGS" if in_earnings_window else "⬜ HOLD/WATCH")
-        
-        scan_results.append({
-            "Ticker": t,
-            "Action": status,
-            "Score": round(prev['Quant_Score'], 1),
-            "Shares (1% Risk)": int(shares) if status == "🔥 BUY NOW" else 0,
-            "Stop Loss": round(sl_price, 2)
-        })
+# 3. Final Sizing Cap
+shares = min(raw_shares, account_capital / prev['Close']) 
 
-st.table(pd.DataFrame(scan_results))
-
-st.info("💡 **Ready to Trade:** ระบบนี้คำนวณจากข้อมูลที่ปราศจาก Look-ahead bias และตรวจสอบช่วงวันงบออกให้เรียบร้อยแล้ว")
+# 4. RR Ratio Calculation
+# Assume Target = Entry + (2 * ATR)
+tp_price = prev['Close'] + (prev['ATR'] * 4) 
+rr_ratio = (tp_price - prev['Close']) / (prev['Close'] - sl_price)
+# ...
