@@ -4,9 +4,9 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime
 
-# ══════════════════════════════════════════════════════════════════════════
+# ==========================================================================
 # ⚙️ 1. SETUP ENGINE CONFIG & APP THEME
-# ══════════════════════════════════════════════════════════════════════════
+# ==========================================================================
 st.set_page_config(page_title="อาหวัง Pro Max v17.2 - Zero-Bias Core", layout="wide")
 
 st.sidebar.markdown("## 🦅 อาหวัง Pro Max v17.2")
@@ -14,10 +14,9 @@ st.sidebar.markdown("### `Zero-Bias Institutional Core`")
 st.sidebar.caption("🔒 ระบบคำนวณความเสี่ยงพอร์ตรวมและออกใบสั่งการเทรดรายวัน")
 st.sidebar.divider()
 
-# แผงควบคุมบริหารความเสี่ยงระดับกองทุน (Institutional Money Management Sliders)
 account_capital = st.sidebar.number_input("เงินทุนเริ่มต้นรวมของพอร์ต ($):", value=100000, step=5000)
 base_risk_pct = st.sidebar.slider("ความเสี่ยงสูงสุดที่ยอมรับได้ต่อไม้ (1R %):", 0.25, 2.0, 1.0, 0.25)
-max_heat_limit = st.sidebar.slider("🔥 Max Portfolio Heat Cap (%):", 1.0, 10.0, 3.0, 0.5, help="เพดานรวมความเสี่ยงของทุกไม้ที่ถือค้างไว้พร้อมกัน ห้ามเกินค่านี้")
+max_heat_limit = st.sidebar.slider("🔥 Max Portfolio Heat Cap (%):", 1.0, 10.0, 3.0, 0.5)
 slippage_rate = st.sidebar.slider("Slippage ประมาณการขาเข้า/ออก (%):", 0.0, 0.5, 0.1, 0.05)
 
 st.sidebar.markdown("### 🎛️ Dynamic Alpha Filters")
@@ -31,12 +30,12 @@ rsi_filter = st.sidebar.slider("กรอบ RSI ปลอดภัยหน้�
 st.session_state['rsi_low_val'] = rsi_filter[0]
 st.session_state['rsi_high_val'] = rsi_filter[1]
 
-# ตะกร้าหุ้นผู้นำตลาดที่ใช้ในการจัดหมวดหมู่ Percentile ร่วมกันรายวัน
+# ตะกร้าหุ้นหลัก
 tickers_pool = ["NVDA", "PLTR", "AMD", "TSLA", "META", "AAPL", "MSFT", "GOOGL", "AMZN", "NFLX", "COIN", "ASTS", "SMCI", "AVGO", "CMG"]
 
-# ══════════════════════════════════════════════════════════════════════════
-# 🧠 2. UNIFIED ZERO-BIAS SIGNAL ENGINE (ROLLING COMPUTE ONLY)
-# ══════════════════════════════════════════════════════════════════════════
+# ==========================================================================
+# 🧠 2. UNIFIED ZERO-BIAS SIGNAL ENGINE
+# ==========================================================================
 @st.cache_data(ttl=60)
 def fetch_market_data(ticker, period="3y"):
     try:
@@ -51,12 +50,12 @@ def compute_rolling_indicators_and_signals(df):
     try:
         df = df.copy()
         
-        # Trend Zones (Stage 2 Metrics)
+        # Trend Zones
         df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
         df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
         df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
         
-        # Momentum Indicators
+        # Momentum
         df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
         df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
         df['MACD'] = df['EMA_12'] - df['EMA_26']
@@ -75,28 +74,26 @@ def compute_rolling_indicators_and_signals(df):
         df['True_Range'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         df['ATR'] = df['True_Range'].ewm(span=14, adjust=False).mean()
         
-        # 🔥 ล้างบาป LOOK-AHEAD BIAS: ใช้การคำนวณแบบ Rolling สเปรดไปข้างหน้าวันต่อวัน ไม่มีสิทธิ์เห็นอนาคต
         df['Rolling_Ret_90'] = (df['Close'] / df['Close'].shift(90)) - 1.0
+        
+        # 🛠️ SAFE FIX: ประกาศตัวแปรหล่อลื่นไว้ล่วงหน้าเพื่อป้องกัน KeyError ขาออก
+        df['Quant_Score'] = 0.0
+        df['Signal'] = 0
         
         return df
     except:
         return None
 
 def apply_cross_sectional_ranking(ticker_dict):
-    """
-    🔥 ล้างบาป RELATIVE STRENGTH BIAS: นำข้อมูล ณ วันนั้นๆ มา Rank หาค่า Percentile เทียบกันแบบวันต่อวัน
-    """
-    all_dates = sorted(list(set(date for df in ticker_dict.values() if df is not None for date in df.index)))
+    valid_dfs = {k: v for k, v in ticker_dict.items() if v is not None and len(v) >= 200}
+    if not valid_dfs: return
     
-    for ticker in ticker_dict:
-        if ticker_dict[ticker] is not None:
-            ticker_dict[ticker]['Quant_Score'] = 0.0
-            ticker_dict[ticker]['Signal'] = 0
-            
+    all_dates = sorted(list(set(date for df in valid_dfs.values() for date in df.index)))
+    
     for date in all_dates:
         daily_returns = {}
-        for ticker, df in ticker_dict.items():
-            if df is not None and date in df.index and not np.isnan(df.loc[date, 'Rolling_Ret_90']):
+        for ticker, df in valid_dfs.items():
+            if date in df.index and not np.isnan(df.loc[date, 'Rolling_Ret_90']):
                 daily_returns[ticker] = df.loc[date, 'Rolling_Ret_90']
                 
         if len(daily_returns) < 2: continue
@@ -105,26 +102,25 @@ def apply_cross_sectional_ranking(ticker_dict):
         pct_ranks = ret_series.rank(pct=True) 
         
         for ticker in daily_returns:
-            df = ticker_dict[ticker]
+            df = valid_dfs[ticker]
             idx = df.index.get_loc(date)
             if idx < 200: continue
             
             prev_row = df.iloc[idx-1]
-            
             score = 0
+            
             is_stage_2 = (prev_row['Close'] > prev_row['EMA_20'] > prev_row['EMA_50'] > prev_row['EMA_200'])
             if is_stage_2: score += 40
             if prev_row['MACD'] > prev_row['Signal_Line']: score += 20
             if 50 <= prev_row['RSI'] <= 75: score += 20
             
-            # แปลง Percentile เป็นเกรดแต้มโบนัสแบบขั้นบันได ป้องกันอาการแต้มเฟ้อเท่ากันหมด
             ticker_pct = pct_ranks[ticker]
             if ticker_pct >= 0.90: score += 20
             elif ticker_pct >= 0.80: score += 15
             elif ticker_pct >= 0.70: score += 10
             elif ticker_pct >= 0.50: score += 5
             
-            df.iloc[idx, df.columns.get_loc('Quant_Score')] = score
+            df.iloc[idx, df.columns.get_loc('Quant_Score')] = float(score)
             
             pass_score = (score >= st.session_state.get('min_score_val', 50))
             pass_trend = True if not st.session_state.get('enforce_s2_val', True) else is_stage_2
@@ -135,11 +131,14 @@ def apply_cross_sectional_ranking(ticker_dict):
             else:
                 df.iloc[idx, df.columns.get_loc('Signal')] = 0
 
-# ══════════════════════════════════════════════════════════════════════════
-# 📊 3. REALISTIC PORTFOLIO HEAT RISK ENGINE (BACKTEST CORE)
-# ══════════════════════════════════════════════════════════════════════════
+# ==========================================================================
+# 📊 3. REALISTIC PORTFOLIO HEAT RISK ENGINE
+# ==========================================================================
 def run_strict_portfolio_backtest(ticker_dict, initial_capital=100000, risk_pct=1.0, slippage_pct=0.1, max_portfolio_heat=3.0):
-    all_dates = sorted(list(set(date for df in ticker_dict.values() if df is not None for date in df.index)))
+    valid_dfs = {k: v for k, v in ticker_dict.items() if v is not None and len(v) >= 200}
+    if not valid_dfs: return [], [initial_capital]
+    
+    all_dates = sorted(list(set(date for df in valid_dfs.values() for date in df.index)))
     capital = initial_capital
     portfolio_value = initial_capital
     active_trades = {}
@@ -150,38 +149,34 @@ def run_strict_portfolio_backtest(ticker_dict, initial_capital=100000, risk_pct=
         current_open_risk = 0.0
         terminated_tickers = []
         
-        # ตรวจสอบสถานะและคำนวณ Heat ของไม้ที่ถือค้างอยู่
         for ticker, pos in active_trades.items():
-            df = ticker_dict[ticker]
+            df = valid_dfs[ticker]
             if date in df.index:
                 row = df.loc[date]
                 
-                if row['Open'] <= pos['sl_price']: # เจอสภาวะ Gap Risk ตอนตลาดเปิด
+                if row['Open'] <= pos['sl_price']:
                     exit_price = row['Open'] * (1 - slippage_pct/100)
                     pnl = (exit_price - pos['entry_price']) * pos['shares']
                     capital += pnl
                     trade_log.append({"ticker": ticker, "type": "SL (GAP RISK)", "pnl": pnl, "R_match": pnl / pos['risk_amount']})
                     terminated_tickers.append(ticker)
-                elif row['Low'] <= pos['sl_price']: # คัทลอสปกติระหว่างวัน
+                elif row['Low'] <= pos['sl_price']:
                     exit_price = pos['sl_price'] * (1 - slippage_pct/100)
                     pnl = (exit_price - pos['entry_price']) * pos['shares']
                     capital += pnl
                     trade_log.append({"ticker": ticker, "type": "SL", "pnl": pnl, "R_match": pnl / pos['risk_amount']})
                     terminated_tickers.append(ticker)
                 else:
-                    # ขยับเส้น Trailing Stop ติดตามพฤติกรรมราคา
                     trail_sl = row['High'] - (row['ATR'] * 2.0)
                     if trail_sl > pos['sl_price']: pos['sl_price'] = trail_sl
                     
-                    # คำนวณความเสี่ยงที่เปิดทิ้งไว้จริง ณ ราคาปัจจุบันเพื่อสะสมยอด Heat พอร์ต
                     current_risk_distance = row['Close'] - pos['sl_price']
                     if current_risk_distance > 0:
                         current_open_risk += max(current_risk_distance * pos['shares'], 0.0)
                         
         for t in terminated_tickers: del active_trades[t]
             
-        # เปิดใจรับไม้ใหม่ภายใต้กฎควบคุมความร้อนพอร์ตรวม (Portfolio Heat Limit)
-        for ticker, df in ticker_dict.items():
+        for ticker, df in valid_dfs.items():
             if ticker in active_trades: continue
             if date in df.index:
                 row = df.loc[date]
@@ -193,15 +188,13 @@ def run_strict_portfolio_backtest(ticker_dict, initial_capital=100000, risk_pct=
                     intended_risk_cash = portfolio_value * (risk_pct / 100)
                     projected_heat_pct = ((current_open_risk + intended_risk_cash) / portfolio_value) * 100
                     
-                    # 🔴 CRITICAL HARD CAP: ถ้ารวมความเสี่ยงไม้ใหม่เข้าไปแล้ว Heat เกินกำหนด -> สั่งปฏิเสธเด็ดขาด
                     if projected_heat_pct > max_portfolio_heat: continue 
                     
-                    # 🔴 EXACT POSITION SIZING FORMULA (รวม Slippage แฝงฝั่งซื้อเข้าส่วนหาร):
                     execution_entry = row['Open'] * (1 + slippage_pct/100)
                     shares = intended_risk_cash / (sl_distance + (row['Open'] * (slippage_pct/100)))
                     
                     cost = shares * execution_entry
-                    if cost > capital: # วงเงินสดไม่พอซื้อเต็มจำนวน สั่งปรับขนาดหุ้นลงตามความสามารถจ่ายจริง
+                    if cost > capital:
                         shares = capital / execution_entry
                         cost = shares * execution_entry
                         
@@ -217,29 +210,30 @@ def run_strict_portfolio_backtest(ticker_dict, initial_capital=100000, risk_pct=
                         
         end_day_equity = capital
         for ticker, pos in active_trades.items():
-            if date in ticker_dict[ticker].index:
-                end_day_equity += ticker_dict[ticker].loc[date, 'Close'] * pos['shares']
+            if date in valid_dfs[ticker].index:
+                end_day_equity += valid_dfs[ticker].loc[date, 'Close'] * pos['shares']
         portfolio_value = end_day_equity
         daily_equity.append(portfolio_value)
         
     return trade_log, daily_equity
 
-# ══════════════════════════════════════════════════════════════════════════
-# 🎯 4. EXECUTIVE DUAL DASHBOARD: ACTION LIST & INTERACTIVE DECK
-# ══════════════════════════════════════════════════════════════════════════
+# ==========================================================================
+# 🎯 4. EXECUTIVE DUAL DASHBOARD: ACTION LIST
+# ==========================================================================
 st.title("🦅 แผงควบคุมปฏิบัติการเทรดสถาบัน v17.2 (The Strict Quant Engine)")
 st.caption("ระบบคำนวณแบบขจัดความเอนเอียงทางเวลา (Zero-Bias) คุมความเสี่ยงพอร์ตรวมอัตโนมัติ พร้อมออกแผ่นงานส่งคำสั่งทันที")
 
-with st.spinner("กำลังประมวลผลข้อมูลประวัติศาสตร์รายวันและขจัด Look-Ahead Bias ออกจากพอร์ต..."):
+with st.spinner("กำลังสแกนหา Alpha ผู้นำตลาดรายวัน..."):
     ticker_dict = {}
     for t in tickers_pool:
         raw_df = fetch_market_data(t, "3y")
         if raw_df is not None:
-            ticker_dict[t] = compute_rolling_indicators_and_signals(raw_df)
+            processed = compute_rolling_indicators_and_signals(raw_df)
+            if processed is not None:
+                ticker_dict[t] = processed
             
     apply_cross_sectional_ranking(ticker_dict)
 
-# แยกจัดหมวดหมู่หุ้นหน้างานออกเป็นสามสถานะเด็ดขาด (Action List Machine)
 buy_today_list = []
 watch_list = []
 ban_list = []
@@ -252,7 +246,6 @@ for t, df in ticker_dict.items():
         execution_entry = last['Close'] * (1 + slippage_rate/100)
         intended_risk_cash = account_capital * (base_risk_pct / 100)
         
-        # ถอดสูตร Position Sizing หน้างานให้แม่นตรงเป๊ะตามทฤษฎีเงินจริง
         exact_shares = intended_risk_cash / (sl_distance + (last['Close'] * (slippage_rate/100))) if sl_distance > 0 else 0
         exact_cash = exact_shares * execution_entry
         
@@ -274,7 +267,6 @@ for t, df in ticker_dict.items():
         else:
             ban_list.append(metrics_payload)
 
-# 🚀 ส่วนที่ 1: หน้าจออินเตอร์เฟซแยกแท็บระดับ "ใช้ง่ายมาก" (Action List & Trade Sheet Ready)
 st.subheader("🔥 1. รายการสั่งการหน้างานด่วน (Action List & Trade Sheet)")
 
 tab_buy, tab_watch, tab_ban = st.tabs([
@@ -300,10 +292,8 @@ with tab_ban:
         st.error("❌ หุ้นห้ามยุ่งเด็ดขาดในวันนี้เนื่องจากแนวโน้มพังทลาย หรือคะแนนวินัยต่ำกว่าเกณฑ์ควบคุม")
         st.dataframe(pd.DataFrame(ban_list)[["Ticker", "คะแนน Quant", "ราคาสดปัจจุบัน", "RSI ปัจจุบัน"]], use_container_width=True, hide_index=True)
 
-# 📊 ส่วนที่ 2: คณิตศาสตร์ความได้เปรียบพอร์ตรวมย้อนหลังไร้ Bias
 st.divider()
 st.subheader("📊 2. ดัชนีวัดผลทดสอบพอร์ตรวมจำลองแบบตัดผลประโยชน์ล่วงหน้า (Institutional Performance Metrics)")
-st.caption(f"ประเมินผลลัพธ์พอร์ตรวมย้อนหลัง 3 ปี ของตะกร้าหุ้นผู้นำตลาด ภายใต้ระบบคุมค่าความร้อนพอร์ตสูงสุดที่ {max_heat_limit}%")
 
 trade_log, daily_equity = run_strict_portfolio_backtest(
     ticker_dict, initial_capital=account_capital, risk_pct=base_risk_pct, slippage_pct=slippage_rate, max_portfolio_heat=max_heat_limit
@@ -336,4 +326,4 @@ if trade_log:
     st.markdown("#### 📜 บันทึกตารางประวัติธุรกรรมเพื่อการตรวจสอบย้อนหลัง (Strict Audit Trade Log)")
     st.dataframe(df_log, use_container_width=True)
 else:
-    st.info("💡 ภายใต้กฎควบคุมความร้อนและจุดคัดกรองที่เข้มงวดนี้ ไม่มีสัญญาณใดเกิดขึ้นในอดีต (ลองปรับลดระดับคะแนน Quant ขั้นต่ำ หรือขยายขีดความเสี่ยงที่ Sidebar เพื่อดูสถิติ)")
+    st.info("💡 ภายใต้กฎควบคุมความร้อนและจุดคัดกรองที่เข้มงวดนี้ ไม่มีสัญญาณใดเกิดขึ้นในอดีต")
