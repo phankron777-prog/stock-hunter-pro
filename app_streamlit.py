@@ -4,11 +4,39 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime
 
+# ══════════════════════════════════════════════════════════════════════════
+# ⚙️ 1. SETUP ENGINE CONFIG & APP THEME
+# ══════════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="อาหวัง Pro Max v17.2 - Zero-Bias Core", layout="wide")
 
-# ==========================================================================
-# 🧠 1. UNIFIED ZERO-BIAS SIGNAL ENGINE (ROLLING COMPUTE ONLY)
-# ==========================================================================
+st.sidebar.markdown("## 🦅 อาหวัง Pro Max v17.2")
+st.sidebar.markdown("### `Zero-Bias Institutional Core`")
+st.sidebar.caption("🔒 ระบบคำนวณความเสี่ยงพอร์ตรวมและออกใบสั่งการเทรดรายวัน")
+st.sidebar.divider()
+
+# แผงควบคุมบริหารความเสี่ยงระดับกองทุน (Institutional Money Management Sliders)
+account_capital = st.sidebar.number_input("เงินทุนเริ่มต้นรวมของพอร์ต ($):", value=100000, step=5000)
+base_risk_pct = st.sidebar.slider("ความเสี่ยงสูงสุดที่ยอมรับได้ต่อไม้ (1R %):", 0.25, 2.0, 1.0, 0.25)
+max_heat_limit = st.sidebar.slider("🔥 Max Portfolio Heat Cap (%):", 1.0, 10.0, 3.0, 0.5, help="เพดานรวมความเสี่ยงของทุกไม้ที่ถือค้างไว้พร้อมกัน ห้ามเกินค่านี้")
+slippage_rate = st.sidebar.slider("Slippage ประมาณการขาเข้า/ออก (%):", 0.0, 0.5, 0.1, 0.05)
+
+st.sidebar.markdown("### 🎛️ Dynamic Alpha Filters")
+min_score_cutoff = st.sidebar.slider("คะแนน Quant ขั้นต่ำในการแจกสัญญาณ:", 0, 100, 50, step=5)
+st.session_state['min_score_val'] = min_score_cutoff
+
+enforce_stage2 = st.sidebar.toggle("กรองเฉพาะ Stage 2 (EMA เรียงตัวขาขึ้น)", value=True)
+st.session_state['enforce_s2_val'] = enforce_stage2
+
+rsi_filter = st.sidebar.slider("กรอบ RSI ปลอดภัยหน้างาน:", 0, 100, (45, 80))
+st.session_state['rsi_low_val'] = rsi_filter[0]
+st.session_state['rsi_high_val'] = rsi_filter[1]
+
+# ตะกร้าหุ้นผู้นำตลาดที่ใช้ในการจัดหมวดหมู่ Percentile ร่วมกันรายวัน
+tickers_pool = ["NVDA", "PLTR", "AMD", "TSLA", "META", "AAPL", "MSFT", "GOOGL", "AMZN", "NFLX", "COIN", "ASTS", "SMCI", "AVGO", "CMG"]
+
+# ══════════════════════════════════════════════════════════════════════════
+# 🧠 2. UNIFIED ZERO-BIAS SIGNAL ENGINE (ROLLING COMPUTE ONLY)
+# ══════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=60)
 def fetch_market_data(ticker, period="3y"):
     try:
@@ -47,7 +75,7 @@ def compute_rolling_indicators_and_signals(df):
         df['True_Range'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         df['ATR'] = df['True_Range'].ewm(span=14, adjust=False).mean()
         
-        # 🔥 แก้ไข LOOK-AHEAD BIAS: Rolling 90 วัน
+        # 🔥 ล้างบาป LOOK-AHEAD BIAS: ใช้การคำนวณแบบ Rolling สเปรดไปข้างหน้าวันต่อวัน ไม่มีสิทธิ์เห็นอนาคต
         df['Rolling_Ret_90'] = (df['Close'] / df['Close'].shift(90)) - 1.0
         
         return df
@@ -55,6 +83,9 @@ def compute_rolling_indicators_and_signals(df):
         return None
 
 def apply_cross_sectional_ranking(ticker_dict):
+    """
+    🔥 ล้างบาป RELATIVE STRENGTH BIAS: นำข้อมูล ณ วันนั้นๆ มา Rank หาค่า Percentile เทียบกันแบบวันต่อวัน
+    """
     all_dates = sorted(list(set(date for df in ticker_dict.values() if df is not None for date in df.index)))
     
     for ticker in ticker_dict:
@@ -86,6 +117,7 @@ def apply_cross_sectional_ranking(ticker_dict):
             if prev_row['MACD'] > prev_row['Signal_Line']: score += 20
             if 50 <= prev_row['RSI'] <= 75: score += 20
             
+            # แปลง Percentile เป็นเกรดแต้มโบนัสแบบขั้นบันได ป้องกันอาการแต้มเฟ้อเท่ากันหมด
             ticker_pct = pct_ranks[ticker]
             if ticker_pct >= 0.90: score += 20
             elif ticker_pct >= 0.80: score += 15
@@ -103,9 +135,9 @@ def apply_cross_sectional_ranking(ticker_dict):
             else:
                 df.iloc[idx, df.columns.get_loc('Signal')] = 0
 
-# ==========================================================================
-# 📊 2. REALISTIC PORTFOLIO HEAT RISK ENGINE
-# ==========================================================================
+# ══════════════════════════════════════════════════════════════════════════
+# 📊 3. REALISTIC PORTFOLIO HEAT RISK ENGINE (BACKTEST CORE)
+# ══════════════════════════════════════════════════════════════════════════
 def run_strict_portfolio_backtest(ticker_dict, initial_capital=100000, risk_pct=1.0, slippage_pct=0.1, max_portfolio_heat=3.0):
     all_dates = sorted(list(set(date for df in ticker_dict.values() if df is not None for date in df.index)))
     capital = initial_capital
@@ -118,34 +150,37 @@ def run_strict_portfolio_backtest(ticker_dict, initial_capital=100000, risk_pct=
         current_open_risk = 0.0
         terminated_tickers = []
         
+        # ตรวจสอบสถานะและคำนวณ Heat ของไม้ที่ถือค้างอยู่
         for ticker, pos in active_trades.items():
             df = ticker_dict[ticker]
             if date in df.index:
                 row = df.loc[date]
                 
-                if row['Open'] <= pos['sl_price']:
+                if row['Open'] <= pos['sl_price']: # เจอสภาวะ Gap Risk ตอนตลาดเปิด
                     exit_price = row['Open'] * (1 - slippage_pct/100)
                     pnl = (exit_price - pos['entry_price']) * pos['shares']
                     capital += pnl
                     trade_log.append({"ticker": ticker, "type": "SL (GAP RISK)", "pnl": pnl, "R_match": pnl / pos['risk_amount']})
                     terminated_tickers.append(ticker)
-                elif row['Low'] <= pos['sl_price']:
+                elif row['Low'] <= pos['sl_price']: # คัทลอสปกติระหว่างวัน
                     exit_price = pos['sl_price'] * (1 - slippage_pct/100)
                     pnl = (exit_price - pos['entry_price']) * pos['shares']
                     capital += pnl
                     trade_log.append({"ticker": ticker, "type": "SL", "pnl": pnl, "R_match": pnl / pos['risk_amount']})
                     terminated_tickers.append(ticker)
                 else:
+                    # ขยับเส้น Trailing Stop ติดตามพฤติกรรมราคา
                     trail_sl = row['High'] - (row['ATR'] * 2.0)
                     if trail_sl > pos['sl_price']: pos['sl_price'] = trail_sl
                     
+                    # คำนวณความเสี่ยงที่เปิดทิ้งไว้จริง ณ ราคาปัจจุบันเพื่อสะสมยอด Heat พอร์ต
                     current_risk_distance = row['Close'] - pos['sl_price']
                     if current_risk_distance > 0:
-                        calculated_risk = current_risk_distance * pos['shares']
-                        current_open_risk += max(calculated_risk, 0.0)
+                        current_open_risk += max(current_risk_distance * pos['shares'], 0.0)
                         
         for t in terminated_tickers: del active_trades[t]
             
+        # เปิดใจรับไม้ใหม่ภายใต้กฎควบคุมความร้อนพอร์ตรวม (Portfolio Heat Limit)
         for ticker, df in ticker_dict.items():
             if ticker in active_trades: continue
             if date in df.index:
@@ -157,13 +192,16 @@ def run_strict_portfolio_backtest(ticker_dict, initial_capital=100000, risk_pct=
                     
                     intended_risk_cash = portfolio_value * (risk_pct / 100)
                     projected_heat_pct = ((current_open_risk + intended_risk_cash) / portfolio_value) * 100
+                    
+                    # 🔴 CRITICAL HARD CAP: ถ้ารวมความเสี่ยงไม้ใหม่เข้าไปแล้ว Heat เกินกำหนด -> สั่งปฏิเสธเด็ดขาด
                     if projected_heat_pct > max_portfolio_heat: continue 
                     
+                    # 🔴 EXACT POSITION SIZING FORMULA (รวม Slippage แฝงฝั่งซื้อเข้าส่วนหาร):
                     execution_entry = row['Open'] * (1 + slippage_pct/100)
                     shares = intended_risk_cash / (sl_distance + (row['Open'] * (slippage_pct/100)))
                     
                     cost = shares * execution_entry
-                    if cost > capital:
+                    if cost > capital: # วงเงินสดไม่พอซื้อเต็มจำนวน สั่งปรับขนาดหุ้นลงตามความสามารถจ่ายจริง
                         shares = capital / execution_entry
                         cost = shares * execution_entry
                         
@@ -186,34 +224,13 @@ def run_strict_portfolio_backtest(ticker_dict, initial_capital=100000, risk_pct=
         
     return trade_log, daily_equity
 
-# ==========================================================================
-# 🎛️ 3. STREAMLIT CONFIGURATION CONTROL
-# ==========================================================================
-st.sidebar.markdown("## 🦅 อาหวัง Pro Max v17.2")
-st.sidebar.markdown("### `Zero-Bias Institutional Core`")
-st.sidebar.divider()
+# ══════════════════════════════════════════════════════════════════════════
+# 🎯 4. EXECUTIVE DUAL DASHBOARD: ACTION LIST & INTERACTIVE DECK
+# ══════════════════════════════════════════════════════════════════════════
+st.title("🦅 แผงควบคุมปฏิบัติการเทรดสถาบัน v17.2 (The Strict Quant Engine)")
+st.caption("ระบบคำนวณแบบขจัดความเอนเอียงทางเวลา (Zero-Bias) คุมความเสี่ยงพอร์ตรวมอัตโนมัติ พร้อมออกแผ่นงานส่งคำสั่งทันที")
 
-account_capital = st.sidebar.number_input("เงินทุนเริ่มต้นรวมกองทุน ($):", value=100000, step=5000)
-base_risk_pct = st.sidebar.slider("ความเสี่ยงจำกัดต่อไม้ (1R %):", 0.25, 2.0, 1.0, 0.25)
-max_heat_limit = st.sidebar.slider("🔥 Max Portfolio Heat Cap (%):", 1.0, 10.0, 3.0, 0.5)
-slippage_rate = st.sidebar.slider("Slippage แฝงขาเข้า/ออก (%):", 0.0, 0.5, 0.1, 0.05)
-
-st.sidebar.markdown("### 🎛️ Dynamic Alpha Filters")
-# 🛠️ FIXED: แก้ไขการเรียกใช้งาน st.session_state ให้ถูกต้อง ป้องกันแอปพัง
-min_score_cutoff = st.sidebar.slider("คะแนน Quant ขั้นต่ำ:", 0, 100, 50, step=5)
-st.session_state['min_score_val'] = min_score_cutoff
-
-enforce_stage2 = st.sidebar.toggle("กรองเฉพาะ Stage 2 (EMA ขาขึ้น)", value=True)
-st.session_state['enforce_s2_val'] = enforce_stage2
-
-rsi_filter = st.sidebar.slider("กรอบช่วง RSI เทรดหน้างาน:", 0, 100, (45, 80))
-st.session_state['rsi_low_val'] = rsi_filter[0]
-st.session_state['rsi_high_val'] = rsi_filter[1]
-
-# Pool หุ้นผู้นำตลาด
-tickers_pool = ["NVDA", "PLTR", "AMD", "TSLA", "META", "AAPL", "MSFT", "GOOGL", "AMZN", "NFLX", "COIN", "ASTS", "SMCI", "AVGO", "CMG"]
-
-with st.spinner("กำลังล้างข้อมูลประวัติศาสตร์ และสกัด Look-Ahead Bias..."):
+with st.spinner("กำลังประมวลผลข้อมูลประวัติศาสตร์รายวันและขจัด Look-Ahead Bias ออกจากพอร์ต..."):
     ticker_dict = {}
     for t in tickers_pool:
         raw_df = fetch_market_data(t, "3y")
@@ -222,12 +239,7 @@ with st.spinner("กำลังล้างข้อมูลประวัต
             
     apply_cross_sectional_ranking(ticker_dict)
 
-# ==========================================================================
-# 🎯 4. EXECUTIVE ACTION LIST & TRADE SHEET DASHBOARD
-# ==========================================================================
-st.title("🦅 แผงควบคุมปฏิบัติการเทรดสถาบัน v17.2 (The Strict Quant Engine)")
-st.caption("ระบบคำนวณแบบขจัดความเอนเอียงทางเวลา (Zero-Bias) คุมความเสี่ยงพอร์ตรวมอัตโนมัติ พร้อมออกแผ่นงานส่งคำสั่งทันที")
-
+# แยกจัดหมวดหมู่หุ้นหน้างานออกเป็นสามสถานะเด็ดขาด (Action List Machine)
 buy_today_list = []
 watch_list = []
 ban_list = []
@@ -240,18 +252,19 @@ for t, df in ticker_dict.items():
         execution_entry = last['Close'] * (1 + slippage_rate/100)
         intended_risk_cash = account_capital * (base_risk_pct / 100)
         
+        # ถอดสูตร Position Sizing หน้างานให้แม่นตรงเป๊ะตามทฤษฎีเงินจริง
         exact_shares = intended_risk_cash / (sl_distance + (last['Close'] * (slippage_rate/100))) if sl_distance > 0 else 0
         exact_cash = exact_shares * execution_entry
         
         metrics_payload = {
             "Ticker": t,
             "คะแนน Quant": f"{last['Quant_Score']:.0f} แต้ม",
-            "ราคาสดล่าสุด": f"${last['Close']:.2f}",
-            "RSI": f"{last['RSI']:.1f}",
-            "แนะนำเข้าซื้อ (Shares)": int(exact_shares),
-            "วงเงินที่ใช้จริง ($)": f"${exact_cash:,.2f}",
-            "จุดคัท Stop Loss": f"${last['Close'] - sl_distance:.2f}",
-            "จุดล็อกกำไรแนะนำ (2R)": f"${last['Close'] + (sl_distance * 2.0):.2f}"
+            "ราคาสดปัจจุบัน": f"${last['Close']:.2f}",
+            "RSI ปัจจุบัน": f"{last['RSI']:.1f}",
+            "ส่งคำสั่งซื้อ (Shares)": int(exact_shares),
+            "วงเงินที่ต้องใช้ ($)": f"${exact_cash:,.2f}",
+            "ตั้ง Stop Loss (SL)": f"${last['Close'] - sl_distance:.2f}",
+            "เป้าทำกำไร (2R)": f"${last['Close'] + (sl_distance * 2.0):.2f}"
         }
         
         if last['Signal'] == 1:
@@ -261,28 +274,40 @@ for t, df in ticker_dict.items():
         else:
             ban_list.append(metrics_payload)
 
+# 🚀 ส่วนที่ 1: หน้าจออินเตอร์เฟซแยกแท็บระดับ "ใช้ง่ายมาก" (Action List & Trade Sheet Ready)
 st.subheader("🔥 1. รายการสั่งการหน้างานด่วน (Action List & Trade Sheet)")
-tab_buy, tab_watch, tab_ban = st.tabs(["🟢 แผ่นงานส่งคำสั่งซื้อวันนี้ (BUY TODAY)", "⚠️ รายการหุ้นเฝ้าระวัง (WATCHLIST)", "❌ หุ้นห้ามจับต้องเด็ดขาด (BANNED ZONE)"])
+
+tab_buy, tab_watch, tab_ban = st.tabs([
+    "🟢 แผ่นงานส่งคำสั่งซื้อวันนี้ (BUY TODAY)", 
+    "⚠️ รายการหุ้นเฝ้าระวัง (WATCHLIST)", 
+    "❌ หุ้นห้ามจับต้องเด็ดขาด (BANNED ZONE)"
+])
 
 with tab_buy:
     if buy_today_list:
-        st.success("🎯 พบสัญญาณซื้อตามกฎกองทุนเคร่งครัดในวันนี้! สามารถใช้สัดส่วน Sizing และจุด Stop Loss ด้านล่างคีย์ส่งคำสั่งซื้อขายจริงได้ทันที")
+        st.success("🎯 พบสัญญาณซื้อตามกฎสถาบันในวันนี้! สามารถลอกสัดส่วน Shares และจุด Stop Loss ด้านล่างนี้ไปคีย์ส่งคำสั่งซื้อขายจริงได้ทันที")
         st.dataframe(pd.DataFrame(buy_today_list), use_container_width=True, hide_index=True)
     else:
-        st.info("⬜ วันนี้พอร์ตปลอดภัย ไม่มีสัญญาณซื้อร่วมที่สมบูรณ์แบบ นอนทับมือและคุมเงินสดไว้")
+        st.info("⬜ วันนี้พอร์ตปลอดภัย ไม่มีหุ้นตัวใดในระบบส่งสัญญาณซื้อร่วมที่สมบูรณ์แบบ นอนทับมือและคุมเงินสดไว้")
 
 with tab_watch:
     if watch_list:
-        st.dataframe(pd.DataFrame(watch_list)[["Ticker", "คะแนน Quant", "ราคาสดล่าสุด", "RSI"]], use_container_width=True, hide_index=True)
+        st.info("👀 รายการหุ้นที่มีคะแนนสะสมดีแต่สัญญาณซื้อยังไม่สุกงอม คัดออกมาให้เฝ้าดูเพื่อเตรียมความพร้อม")
+        st.dataframe(pd.DataFrame(watch_list)[["Ticker", "คะแนน Quant", "ราคาสดปัจจุบัน", "RSI ปัจจุบัน"]], use_container_width=True, hide_index=True)
 
 with tab_ban:
     if ban_list:
-        st.dataframe(pd.DataFrame(ban_list)[["Ticker", "คะแนน Quant", "ราคาสดล่าสุด", "RSI"]], use_container_width=True, hide_index=True)
+        st.error("❌ หุ้นห้ามยุ่งเด็ดขาดในวันนี้เนื่องจากแนวโน้มพังทลาย หรือคะแนนวินัยต่ำกว่าเกณฑ์ควบคุม")
+        st.dataframe(pd.DataFrame(ban_list)[["Ticker", "คะแนน Quant", "ราคาสดปัจจุบัน", "RSI ปัจจุบัน"]], use_container_width=True, hide_index=True)
 
+# 📊 ส่วนที่ 2: คณิตศาสตร์ความได้เปรียบพอร์ตรวมย้อนหลังไร้ Bias
 st.divider()
 st.subheader("📊 2. ดัชนีวัดผลทดสอบพอร์ตรวมจำลองแบบตัดผลประโยชน์ล่วงหน้า (Institutional Performance Metrics)")
+st.caption(f"ประเมินผลลัพธ์พอร์ตรวมย้อนหลัง 3 ปี ของตะกร้าหุ้นผู้นำตลาด ภายใต้ระบบคุมค่าความร้อนพอร์ตสูงสุดที่ {max_heat_limit}%")
 
-trade_log, daily_equity = run_strict_portfolio_backtest(ticker_dict, initial_capital=account_capital, risk_pct=base_risk_pct, slippage_pct=slippage_rate, max_portfolio_heat=max_heat_limit)
+trade_log, daily_equity = run_strict_portfolio_backtest(
+    ticker_dict, initial_capital=account_capital, risk_pct=base_risk_pct, slippage_pct=slippage_rate, max_portfolio_heat=max_heat_limit
+)
 
 if trade_log:
     df_log = pd.DataFrame(trade_log)
@@ -303,12 +328,12 @@ if trade_log:
     max_drawdown = ((eq_series.cummax() - eq_series) / eq_series.cummax()).max() * 100
     
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Mathematical Expectancy (R)", f"{expectancy:.2f} R")
+    col1.metric("Mathematical Expectancy", f"{expectancy:.2f} R")
     col2.metric("Profit Factor", f"{profit_factor:.2f}")
-    col3.metric("Sharpe Ratio (พอร์ต)", f"{sharpe:.2f}")
+    col3.metric("Sharpe Ratio (พอร์ตรวม)", f"{sharpe:.2f}")
     col4.metric("Max Drawdown จริงของพอร์ต", f"{max_drawdown:.1f}%")
     
     st.markdown("#### 📜 บันทึกตารางประวัติธุรกรรมเพื่อการตรวจสอบย้อนหลัง (Strict Audit Trade Log)")
     st.dataframe(df_log, use_container_width=True)
 else:
-    st.info("💡 ภายใต้กฎการคุม Portfolio Heat ที่เข้มงวดนี้ ไม่มีไม้ใดที่เปิดซื้อขายตลอดระยะเวลาที่ผ่านมา (ลองปรับคะแนนขั้นต่ำ หรือขยายขีดความเสี่ยงที่ Sidebar เพื่อทดสอบ)")
+    st.info("💡 ภายใต้กฎควบคุมความร้อนและจุดคัดกรองที่เข้มงวดนี้ ไม่มีสัญญาณใดเกิดขึ้นในอดีต (ลองปรับลดระดับคะแนน Quant ขั้นต่ำ หรือขยายขีดความเสี่ยงที่ Sidebar เพื่อดูสถิติ)")
