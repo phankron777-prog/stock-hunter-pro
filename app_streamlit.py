@@ -7,23 +7,22 @@ import time
 from datetime import datetime
 
 # ==========================================================================
-# ⚙️ 1. SETUP THEME & RISK ENGINE CONFIG (v14.0 Apex Predator)
+# ⚙️ 1. SETUP THEME & RISK ENGINE CONFIG (v14.1 Data Pipeline Fixed)
 # ==========================================================================
-st.set_page_config(page_title="Stock Hunter Pro v14.0", layout="wide")
+st.set_page_config(page_title="Stock Hunter Pro v14.1", layout="wide")
 
 if "refresh_key" not in st.session_state:
     st.session_state.refresh_key = 0
 
-st.sidebar.markdown("## 🦅 Stock Hunter Pro v14.0")
+st.sidebar.markdown("## 🦅 Stock Hunter Pro v14.1")
 st.sidebar.markdown("### `The Apex Predator Engine`")
-st.sidebar.caption("🔒 พัฒนาตามพิมพ์เขียวระบบเทรดสถาบัน: ตรวจสอบความปลอดภัย 4 ชั้น เพื่อชัยชนะที่แท้จริง")
+st.sidebar.caption("🔒 เวอร์ชันแก้ไข Data Pipeline: ขยายขอบเขตการดึงข้อมูลย้อนหลังให้คำนวณ EMA200 ได้ 100%")
 st.sidebar.divider()
 
 # แผงควบคุมบริหารความเสี่ยงถาวรที่ Sidebar
 st.sidebar.markdown("### 🛡️ แผงควบคุม Risk Management")
 account_capital_thb = st.sidebar.number_input("เงินทุนทั้งหมดในพอร์ต (บาท THB):", min_value=1000, value=100000, step=5000)
 
-# ปรับค่าเริ่มต้น (Default) เป็น 1% ตามกฎการอยู่รอดของโปรเทรดเดอร์
 risk_per_trade = st.sidebar.slider(
     "ความเสี่ยงที่ยอมรับได้ต่อไม้ (% ของพอร์ต):", 
     min_value=0.25, max_value=5.0, value=1.0, step=0.25,
@@ -40,10 +39,8 @@ dime_fee_pct = st.sidebar.slider("ค่าธรรมเนียมรวม 
 
 st.sidebar.divider()
 st.sidebar.markdown("### 🏎️ ขีดจำกัดทางสถิติและคณิตศาสตร์")
-atr_multiplier = st.sidebar.slider("ตัวคูณระยะ Stop Loss (ATR Multiplier):", min_value=1.0, max_value=3.0, value=1.5, step=0.1, help="สูตรคำนวณ True ATR จริง ปรับ 1.5 - 2.0 กำลังแน่น")
-
-# ปรับเป้าหมายกำไรเป็น 2.5R ขั้นต่ำตามคำแนะนำของคุณ
-rr_ratio = st.sidebar.slider("อัตราส่วนผลตอบแทนต่อความเสี่ยง (Risk Reward Ratio):", min_value=1.5, max_value=4.0, value=2.5, step=0.1, help="เป้าหมายกำไรเป็นกี่เท่าของระยะคัท")
+atr_multiplier = st.sidebar.slider("ตัวคูณระยะ Stop Loss (ATR Multiplier):", min_value=1.0, max_value=3.0, value=1.5, step=0.1)
+rr_ratio = st.sidebar.slider("อัตราส่วนผลตอบแทนต่อความเสี่ยง (Risk Reward Ratio):", min_value=1.5, max_value=4.0, value=2.5, step=0.1)
 
 st.sidebar.divider()
 menu = st.sidebar.radio(
@@ -60,8 +57,9 @@ menu = st.sidebar.radio(
 @st.cache_data(ttl=15)
 def fetch_timeframe_data(ticker, interval="1h", _state_key=0):
     time.sleep(0.3)
-    period_map = {"15m": "5d", "1h": "1mo", "1d": "6mo"}
-    period = period_map.get(interval, "1mo")
+    # [🔥 ปรับปรุงใหม่ใน v14.1] ขยาย Period ย้อนหลังให้ยาวพอเพื่อให้แท่งราคาทะลุ 200 แท่งชัวร์ๆ
+    period_map = {"15m": "1mo", "1h": "3mo", "1d": "2y"}
+    period = period_map.get(interval, "3mo")
     try:
         stock = yf.Ticker(ticker)
         df = stock.history(period=period, interval=interval)
@@ -74,8 +72,7 @@ def fetch_timeframe_data(ticker, interval="1h", _state_key=0):
         return None
 
 def compute_indicators_and_signals(df):
-    """ แก้บั๊กคำนวณ True ATR จริง และเพิ่มตัวกรองประสิทธิภาพสูงตามพิมพ์เขียวของคุณ """
-    if df is None or len(df) < 200: # ต้องใช้ข้อมูล 200 แท่งเพื่อคำนวณ EMA 200
+    if df is None or len(df) < 200: # ปลอดภัยชัวร์เพราะเราขยาย Period ข้อมูลฝั่งบนแล้ว
         return None
     df = df.copy()
     
@@ -97,13 +94,13 @@ def compute_indicators_and_signals(df):
     rs = gain / (loss + 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # 4. [🔥 แก้ไขจุดตาย] คำนวณ TRUE ATR จริง ขจัดปัญหาราคา Gap เปิดกระโดด
+    # 4. คำนวณ TRUE ATR จริง ขจัดปัญหาราคา Gap เปิดกระโดด
     df['Prev_Close'] = df['Close'].shift(1)
     df['TR1'] = df['High'] - df['Low']
     df['TR2'] = (df['High'] - df['Prev_Close']).abs()
     df['TR3'] = (df['Low'] - df['Prev_Close']).abs()
     df['True_Range'] = df[['TR1', 'TR2', 'TR3']].max(axis=1)
-    df['ATR'] = df['True_Range'].ewm(span=14, adjust=False).mean() # ใช้ Exponential moving average ของ True Range
+    df['ATR'] = df['True_Range'].ewm(span=14, adjust=False).mean()
     
     # 5. โวลุ่มฟิลเตอร์
     df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
@@ -111,11 +108,10 @@ def compute_indicators_and_signals(df):
     return df
 
 def safe_signal_block_v14(df_proc, current_price, atr_mult, rr, spy_ok=True):
-    """ v14.0: ระบบคัดกรองสัญญาณเด็ดขาด ไร้การ Short หุ้น ขจัดสัญญาณขยะสภาวะ Sideway """
     if df_proc is None or len(df_proc) < 2:
         return None
     
-    last_valid_row = df_proc.iloc[-2] # ยึดข้อมูลแท่งที่ปิดแล้วเป็นหลักเพื่อความเสถียร
+    last_valid_row = df_proc.iloc[-2]
     
     if pd.isna(last_valid_row['EMA_20']) or pd.isna(last_valid_row['EMA_50']) or pd.isna(last_valid_row['EMA_200']):
         return None
@@ -126,7 +122,6 @@ def safe_signal_block_v14(df_proc, current_price, atr_mult, rr, spy_ok=True):
     if pd.isna(atr) or atr <= 0:
         atr = current_price * 0.02
 
-    # โครงสร้างคณิตศาสตร์คัดกรองสากลตามที่คุณแนะนำ
     trend_ok = (last_valid_row['Close'] > last_valid_row['EMA_20']) and \
                (last_valid_row['EMA_20'] > last_valid_row['EMA_50']) and \
                (last_valid_row['EMA_50'] > last_valid_row['EMA_200'])
@@ -135,7 +130,6 @@ def safe_signal_block_v14(df_proc, current_price, atr_mult, rr, spy_ok=True):
     macd_ok = (last_valid_row['MACD'] > last_valid_row['Signal_Line'])
     vol_ok = (last_valid_row['Volume'] > (last_valid_row['Vol_MA20'] * 1.3))
 
-    # ตรวจสอบเงื่อนไขการออกไม้ฝั่ง BUY
     if trend_ok and rsi_ok and macd_ok and vol_ok and spy_ok:
         signal = "BUY / LONG"
     elif trend_ok and not vol_ok:
@@ -147,7 +141,6 @@ def safe_signal_block_v14(df_proc, current_price, atr_mult, rr, spy_ok=True):
     else:
         signal = "⬜ NO TRADE (แนวโน้มขาลง/สภาวะ Sideway พักตัว)"
 
-    # ระยะ Stop Loss และเป้าหมายกำไรอิงตาม True ATR และ RR Ratio ใหม่
     sl = current_price - (atr_mult * atr)
     tp = current_price + (rr * (atr_mult * atr))
 
@@ -155,7 +148,6 @@ def safe_signal_block_v14(df_proc, current_price, atr_mult, rr, spy_ok=True):
     if risk_per_share < 1e-5:
         return None
 
-    # จุดขยับสกัดการขาดทุน (Breakeven Trigger เมื่อวิ่งไปได้ 0.7R)
     breakeven_trigger = current_price + (risk_per_share * 0.7)
 
     return {
@@ -181,9 +173,7 @@ def compute_position_size_v14(sig, account_capital_thb, risk_per_trade_pct, max_
         raw_cost_thb = final_shares * current_price_thb
         dime_buffer_thb = raw_cost_thb * (dime_fee_pct / 100)
         
-        # ปัดเศษลงเพื่อความชัวร์ ป้องกันออเดอร์โดน Dime! ปฏิเสธ
         total_cost_thb = np.floor(raw_cost_thb + dime_buffer_thb)
-        
         cost_usd = total_cost_thb / fx_rate
         capped_by_position_limit = shares_by_capital_cap < shares_by_risk
 
@@ -198,15 +188,23 @@ def compute_position_size_v14(sig, account_capital_thb, risk_per_trade_pct, max_
 # ==========================================================================
 # 🎯 3. UI & MODULE CONTROLLERS
 # ==========================================================================
+watchlist_str = "LITE, AXTI, NVDA, PLTR, AMD, TSLA" # กำหนดค่า default ล่วงหน้าเพื่อกัน bug UI ลำดับการคุม tf_choice
+tf_choice = "1h"
+
 if menu == "⚡ 1. คำนวณขนาดไม้เทรด (Position Sizing) & สแกนสด":
-    st.title("🦅 ระบบคัดกรองสัญญาร่วมสถาบันและคำนวณหน้าตัก (Dime! Apex v14.0)")
+    st.title("🦅 ระบบคัดกรองสัญญาร่วมสถาบันและคำนวณหน้าตัก (Dime! Apex v14.1)")
     
     if st.button("🔄 [FORCE REFRESH] อัปเดตราคาสดและดัชนีตลาดทันที", type="primary"):
         st.session_state.refresh_key += 1
         st.rerun()
 
+    watchlist_str = st.text_input("ระบุสัญลักษณ์หุ้นรายตัวที่ต้องการเฝ้าระวัง (คั่นด้วย ,):", watchlist_str)
+    tickers = [t.strip().upper() for t in watchlist_str.split(",") if t.strip()]
+    tickers = list(dict.fromkeys(tickers))[:15]
+    tf_choice = st.selectbox("กรอบเวลาแท่งเทียน (Timeframe):", ["1h", "15m", "1d"])
+
     # --- MARKET FILTER MODULE ---
-    spy_df = fetch_timeframe_data("SPY", interval=tf_choice if "tf_choice" in locals() else "1h", _state_key=st.session_state.refresh_key)
+    spy_df = fetch_timeframe_data("SPY", interval=tf_choice, _state_key=st.session_state.refresh_key)
     spy_ok = True
     if spy_df is not None and len(spy_df) >= 50:
         spy_df['EMA_50'] = spy_df['Close'].ewm(span=50, adjust=False).mean()
@@ -219,11 +217,6 @@ if menu == "⚡ 1. คำนวณขนาดไม้เทรด (Position Si
             st.error(f"🚨 **Market Filter (SPY): RISK** | ดัชนีหลักหลุดเส้นเฉลี่ย (${spy_current:.2f} < ${spy_ema50:.2f}) ตลาดขาลง ระบบจะระงับออเดอร์ฝั่ง BUY")
     else:
         st.caption("⚠️ ไม่สามารถดึงข้อมูลดัชนี SPY ได้ชั่วคราว ระบบข้ามไปกรองตัวหุ้นรายตัว")
-
-    watchlist_str = st.text_input("ระบุสัญลักษณ์หุ้นรายตัวที่ต้องการเฝ้าระวัง (คั่นด้วย ,):", "LITE, AXTI, NVDA, PLTR, AMD, TSLA")
-    tickers = [t.strip().upper() for t in watchlist_str.split(",") if t.strip()]
-    tickers = list(dict.fromkeys(tickers))[:15]
-    tf_choice = st.selectbox("กรอบเวลาแท่งเทียน (Timeframe):", ["1h", "15m", "1d"])
 
     scanned_data = []
     raw_price_data = {}
@@ -269,7 +262,7 @@ if menu == "⚡ 1. คำนวณขนาดไม้เทรด (Position Si
                     })
             else:
                 scanned_data.append({
-                    "หุ้นซิ่ง": t, "ราคาสด (USD)": "-", "สัญญาณวินัยเหล็ก": "⬜ โครงสร้างแท่งราคาประวัติศาสตร์ไม่พอ (<200 แท่ง)",
+                    "หุ้นซิ่ง": t, "ราคาสด (USD)": "-", "สัญญาณวินัยเหล็ก": "⬜ ข้อมูลดิบประวัติศาสตร์ไม่พอสำหรับระบบฟิลเตอร์",
                     "เป้ากำไร TP (USD)": "-", "จุดคัท SL (USD)": "-", "จำนวนเศษหุ้น": "-", "ระบุเงินซื้อใน Dime!": "-", "คิดเป็นดอลลาร์": "-"
                 })
             p_bar.progress((idx + 1) / len(tickers))
@@ -277,7 +270,6 @@ if menu == "⚡ 1. คำนวณขนาดไม้เทรด (Position Si
     if scanned_data:
         st.dataframe(pd.DataFrame(scanned_data), use_container_width=True, hide_index=True)
 
-        # Portfolio Heat Check หน่วยบาท
         st.divider()
         st.subheader("🔥 ตารางประเมินผลกระทบต่อหน้าตักทั้งหมด (Portfolio Heat Check)")
         heat_pct = (total_committed_risk_thb / account_capital_thb * 100) if account_capital_thb > 0 else 0
@@ -292,7 +284,7 @@ if menu == "⚡ 1. คำนวณขนาดไม้เทรด (Position Si
             st.error(f"🚨 **ความเสี่ยงรวมล้นเพดานพอร์ต!** ระบบแนะนำเลือกเคาะซื้อเฉพาะ 1-2 ตัวแรกที่โวลุ่มหนาแน่นที่สุดเพื่อความปลอดภัย")
 
 elif menu == "📐 2. เจาะลึกแผนเทรดคณิตศาสตร์ (สลับ Timeframe ได้)":
-    st.title("📐 แผนกลยุทธ์วินัยรายตัว & Dime! Real-time Override v14.0")
+    st.title("📐 แผนกลยุทธ์วินัยรายตัว & Dime! Real-time Override v14.1")
     
     c_t1, c_t2, c_t3 = st.columns(3)
     t_stock = c_t1.text_input("พิมพ์ตัวย่อหุ้นที่ต้องการเจาะลึกออเดอร์:", "NVDA").upper().strip()
@@ -329,7 +321,6 @@ elif menu == "📐 2. เจาะลึกแผนเทรดคณิตศ�
 
                 cap_note = f" *(โดนจำกัดด้วยกฎสัดส่วนพอร์ต {max_position_pct}%)*" if pos["capped_by_position_limit"] else ""
                 
-                # กล่องคำสั่ง Action Plan ปรับลดระดับความมั่นใจเกินจริงตามที่คุณเตือน
                 st.success(
                     f"📥 **คัมภีร์ระบุคำสั่งซื้อขายบนแอป Dime! เพื่อเพิ่มความได้เปรียบทางสถิติ**\n\n"
                     f"1️⃣ **ขั้นตอนตอนซื้อ:** กดปุ่มซื้อใน Dime! -> เลือกโหมด **'ระบุจำนวนเงิน'** -> ป้อนตัวเลขจำนวนเต็ม **{pos['cost_thb']:,.0f} บาท** ลงไป\n"
@@ -338,11 +329,9 @@ elif menu == "📐 2. เจาะลึกแผนเทรดคณิตศ�
                     f"4️⃣ **แผนขยับบังทุน:** หากราคาวิ่งถูกทางไปจนถึงจุด **${sig['breakeven_trigger']:.2f}** ให้พิจารณาขยับจุด Stop Loss ในใจขึ้นมาตั้งดักไว้ที่ราคาทุน เพื่อลดโอกาสขาดทุนให้เหลือน้อยที่สุด"
                 )
 
-                # Quick Trade Plan Exporter
                 log_text = f"📋 [PLAN] {t_stock} ({t_frame}) | Action: {sig['signal']} | Buy: {pos['cost_thb']:,.0f} THB (~{pos['shares']:.4f} Shares) | Entry: ${sig['current_price']:.2f} | TP: ${sig['tp']:.2f} | SL: ${sig['sl']:.2f} | Max Loss: {pos['actual_risk_thb']:,.0f} THB"
                 st.text_area("📋 คัดลอกข้อความแผนการเทรดด่วนไปเก็บไว้ใน Line / Note:", log_text, height=70)
 
-                # วาดกราฟเทคนิคัลระดับสากลแสดงเส้นแนวโน้มใหญ่
                 plot_df = df_proc.tail(40)
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'], name='ราคาหุ้น'))
@@ -354,7 +343,7 @@ elif menu == "📐 2. เจาะลึกแผนเทรดคณิตศ�
                     fig.add_hline(y=sig['tp'], line_dash="dash", line_color="green", annotation_text=f"Target Price ({rr_ratio}R)")
                     fig.add_hline(y=sig['sl'], line_dash="dash", line_color="red", annotation_text="Stop Loss")
                 
-                fig.update_layout(template="plotly_dark", title=f"แผนภูมิวิเคราะห์คัดเกรดสถาบัน v14 ({t_frame}) ของหุ้น {t_stock}", height=380, margin=dict(l=10, r=10, t=40, b=10))
+                fig.update_layout(template="plotly_dark", title=f"แผนภูมิวิเคราะห์คัดเกรดสถาบัน v14.1 ({t_frame}) ของหุ้น {t_stock}", height=380, margin=dict(l=10, r=10, t=40, b=10))
                 st.plotly_chart(fig, use_container_width=True)
         else:
-            st.error("ไม่สามารถดึงข้อมูลหุ้นตัวนี้ได้เนื่องจากข้อมูลประวัติสถิติไม่เพียงพอ (<200 แท่ง) กรุณาตรวจสอบตัวย่อหรือกรอบเวลาอีกครั้ง")
+            st.error("ไม่สามารถดึงข้อมูลหุ้นตัวนี้ได้เนื่องจากข้อมูลประวัติสถิติไม่เพียงพอ กรุณาตรวจสอบตัวย่อหรือกรอบเวลาอีกครั้ง")
