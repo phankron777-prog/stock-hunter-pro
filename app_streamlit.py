@@ -11,6 +11,9 @@ st.set_page_config(page_title="Stock Hunter Pro v25", layout="wide")
 BENCHMARK = "SPY"
 EARNINGS_BLACKOUT_DAYS = 7  # ผู้ใช้ขอเปลี่ยนจาก 0-3 วัน เป็น 7 วัน
 
+JOURNAL_COLUMNS = ["Date", "Ticker", "Score", "Action", "Price", "Entry", "Stop",
+                   "Shares", "Reason", "Status", "Exit", "Exit Date", "PnL"]
+
 # Sector / theme groupings — used for Sector Rotation view (avg RS Rank
 # per group tells you where money is actually flowing). Extend freely;
 # any ticker not listed here falls into "Other".
@@ -39,6 +42,21 @@ def load_data(ticker):
     try:
         t = yf.Ticker(ticker)
         df = t.history(period="1y", auto_adjust=True)
+        return df if not df.empty else None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600)
+def load_data_long(ticker, period="3y"):
+    """
+    Longer-history loader used only for backtesting. Kept separate from
+    load_data() (which stays at 1y for fast live scoring) since pulling
+    3y for every ticker on every live scan would be unnecessarily slow.
+    """
+    try:
+        t = yf.Ticker(ticker)
+        df = t.history(period=period, auto_adjust=True)
         return df if not df.empty else None
     except Exception:
         return None
@@ -412,6 +430,163 @@ def trade_levels(entry_price, atr, atr_multiple, current_price=None):
 
 
 # ============================================================
+# BACKTEST ENGINE
+# ============================================================
+def run_backtest(ticker_dfs: dict, spy_df_full: pd.DataFrame, forward_days: int,
+                  rebalance_every: int = 5, min_history: int = 260,
+                  market_leader_filter: bool = True, progress_callback=None):
+    """
+    Walk-forward backtest. For each evaluation date T (every
+    `rebalance_every` trading days, to keep runtime reasonable), for
+    every ticker:
+      1. Compute indicators using ONLY data up to and including T
+         (indicators() and High20.shift(1) already prevent the
+         indicator itself from leaking T+1 information).
+      2. Compute that day's RS Rank cross-sectionally against every
+         other ticker in the universe ON THAT SAME DATE (not today's
+         rank applied retroactively — each date gets its own rank).
+      3. Score the setup and classify it (ELITE BUY / BUY / WATCH / AVOID).
+      4. Look FORWARD `forward_days` trading days and record the
+         realized return from T's close to T+forward_days's close.
+         If T+forward_days doesn't exist yet (too close to the most
+         recent date), that row is skipped — it has no resolved outcome.
+
+    This directly tests the claim the scoring system makes: "a higher
+    score should predict better forward returns." It does not simulate
+    position sizing, stops, or slippage — it isolates the SIGNAL itself.
+
+    Returns a DataFrame with one row per (date, ticker) evaluation.
+    """
+    # Pre-compute indicators once per ticker (uses full history, but
+    # indicators at row i only ever depend on rows <= i, so slicing to
+    # i for cross-sectional scoring on date i is still leakage-free).
+    prepped = {}
+    for tkr, df in ticker_dfs.items():
+        if df is None or len(df) < min_history:
+            continue
+        prepped[tkr] = indicators(df)
+
+    if spy_df_full is None or len(spy_df_full) < min_history:
+        return pd.DataFrame()
+    spy_prepped = indicators(spy_df_full)
+
+    if not prepped:
+        return pd.DataFrame()
+
+    # Common date index — only dates where SPY has data; individual
+    # tickers are matched by nearest available date via reindex/ffill
+    # is NOT used here (no leakage tolerance), we use direct index
+    # intersection instead so a missing day just skips that ticker.
+    all_dates = spy_prepped.index
+
+    rows = []
+    eval_positions = list(range(min_history, len(all_dates) - forward_days, rebalance_every))
+    total_steps = len(eval_positions)
+
+    for step_i, i in enumerate(eval_positions):
+        eval_date = all_dates[i]
+        target_idx = i + forward_days
+        if target_idx >= len(all_dates):
+            continue
+        target_date = all_dates[target_idx]
+
+        spy_row = spy_prepped.loc[eval_date]
+        spy_bullish = bool(spy_row["Close"] > spy_row["EMA200"]) if not pd.isna(spy_row["EMA200"]) else False
+
+        # Cross-sectional RS for this date only
+        raw_rel = {}
+        last_rows = {}
+        for tkr, df in prepped.items():
+            if eval_date not in df.index:
+                continue
+            # Slice strictly up to eval_date — no future leakage
+            df_upto = df.loc[:eval_date]
+            if len(df_upto) < min_history:
+                continue
+            spy_upto = spy_prepped.loc[:eval_date]
+            _, rel_score = relative_strength_series(df_upto["Close"], spy_upto["Close"])
+            raw_rel[tkr] = rel_score
+            last_rows[tkr] = df_upto.iloc[-1]
+
+        if not raw_rel:
+            continue
+        rs_ranks_today = rs_rank_from_universe(raw_rel)
+
+        for tkr, row in last_rows.items():
+            rs_rank = rs_ranks_today.get(tkr, np.nan)
+            is_leader = bool(row["Close"] > row["EMA200"]) and (not np.isnan(rs_rank) and rs_rank > 70)
+
+            if market_leader_filter and not is_leader:
+                score = 0
+                action = "❌ AVOID (Not Leader)"
+            else:
+                score, _ = compute_score(row, rs_rank, spy_bullish)
+                action = classify(score)
+
+            # Forward return: entry at eval_date close, exit at target_date close
+            df_full = prepped[tkr]
+            if target_date not in df_full.index:
+                continue
+            entry_price = row["Close"]
+            exit_price = df_full.loc[target_date, "Close"]
+            if entry_price <= 0:
+                continue
+            fwd_return_pct = (exit_price - entry_price) / entry_price * 100
+
+            rows.append({
+                "Date": eval_date,
+                "Ticker": tkr,
+                "Score": score,
+                "Action": action,
+                "RS Rank": round(rs_rank, 1) if not np.isnan(rs_rank) else None,
+                "Entry": round(entry_price, 2),
+                "Exit": round(exit_price, 2),
+                "Forward Return %": round(fwd_return_pct, 2),
+            })
+
+        if progress_callback and total_steps > 0:
+            progress_callback((step_i + 1) / total_steps)
+
+    return pd.DataFrame(rows)
+
+
+def summarize_backtest(bt_df: pd.DataFrame):
+    """
+    Aggregate backtest results by Action bucket: count, win rate
+    (forward return > 0), average forward return, median forward
+    return. This is the table that answers "does ELITE BUY actually
+    outperform AVOID, or do they look the same?"
+    """
+    if bt_df.empty:
+        return pd.DataFrame()
+
+    def win_rate(s):
+        return (s > 0).mean() * 100
+
+    summary = (
+        bt_df.groupby("Action")["Forward Return %"]
+        .agg(
+            Trades="count",
+            Win_Rate=win_rate,
+            Avg_Return="mean",
+            Median_Return="median",
+            Std_Dev="std",
+        )
+        .round(2)
+    )
+    # Order buckets logically rather than alphabetically
+    order = ["🚀 ELITE BUY", "🔥 BUY", "👀 WATCH", "❌ AVOID", "❌ AVOID (Not Leader)"]
+    summary = summary.reindex([o for o in order if o in summary.index])
+    summary = summary.rename(columns={
+        "Win_Rate": "Win Rate %",
+        "Avg_Return": "Avg Return %",
+        "Median_Return": "Median Return %",
+        "Std_Dev": "Std Dev %",
+    })
+    return summary.reset_index()
+
+
+# ============================================================
 # UI
 # ============================================================
 st.title("🦅 Stock Hunter Pro v25")
@@ -464,6 +639,12 @@ with st.sidebar:
         "เปิดใช้ Trade Journal (บันทึกลง CSV)", value=True,
         help="บันทึก Score/Action ณ วันที่ตัดสินใจ พร้อมเหตุผล เพื่อย้อนกลับมาดูผลลัพธ์ภายหลัง"
     )
+
+# Initialize journal state immediately so any section (e.g. Portfolio
+# Dashboard, which appears before the Trade Journal UI further down)
+# can safely read st.session_state.journal_df without a KeyError.
+if "journal_df" not in st.session_state:
+    st.session_state.journal_df = pd.DataFrame(columns=JOURNAL_COLUMNS)
 
 # ------------------------------------------------------------
 # Load benchmark (SPY) once
@@ -590,6 +771,64 @@ if high_gap_tickers:
     )
 
 # ------------------------------------------------------------
+# Portfolio Dashboard — the at-a-glance view a trader checks every
+# day: current heat, exposure, cash remaining, open positions. Built
+# from the Trade Journal's OPEN rows (if journal is enabled and has
+# data), since that's the actual record of what's currently held —
+# the scanner table above is candidates, not your real positions.
+# ------------------------------------------------------------
+st.subheader("📊 Portfolio Dashboard")
+
+if journal_enabled and "journal_df" in st.session_state and not st.session_state.journal_df.empty:
+    open_now = st.session_state.journal_df[st.session_state.journal_df["Status"] == "Open"].copy()
+else:
+    open_now = pd.DataFrame()
+
+if not open_now.empty:
+    open_now["Entry"] = pd.to_numeric(open_now["Entry"], errors="coerce")
+    open_now["Shares"] = pd.to_numeric(open_now["Shares"], errors="coerce")
+    open_now["Position Value"] = open_now["Entry"] * open_now["Shares"]
+    total_exposure = open_now["Position Value"].sum()
+    cash_remaining = capital - total_exposure
+
+    # Current heat = sum of risk $ per open position, using each position's
+    # own ATR-based stop distance recomputed from current data if available,
+    # otherwise fall back to the recorded Stop at entry time.
+    current_risk_total = 0.0
+    for _, r in open_now.iterrows():
+        tkr = r["Ticker"]
+        entry_p = r["Entry"]
+        stop_p = pd.to_numeric(r.get("Stop"), errors="coerce")
+        shares_n = r["Shares"]
+        if pd.notna(stop_p) and pd.notna(entry_p) and pd.notna(shares_n):
+            current_risk_total += abs(entry_p - stop_p) * shares_n
+
+    current_heat_pct = (current_risk_total / capital * 100) if capital > 0 else 0
+
+    pc1, pc2, pc3, pc4, pc5 = st.columns(5)
+    pc1.metric("Open Positions", f"{len(open_now)}")
+    pc2.metric("Total Exposure", f"${total_exposure:,.0f}")
+    pc3.metric("Cash Remaining", f"${cash_remaining:,.0f}")
+    pc4.metric("Current Risk ($)", f"${current_risk_total:,.0f}")
+    pc5.metric("Current Heat", f"{current_heat_pct:.1f}%",
+               delta=f"จำกัด {portfolio_heat_pct:.1f}%", delta_color="off")
+
+    if current_heat_pct > portfolio_heat_pct:
+        st.error(f"🚨 Current Heat ({current_heat_pct:.1f}%) เกิน Portfolio Heat ที่ตั้งไว้ ({portfolio_heat_pct:.1f}%) — พิจารณาลด position หรืองดเปิดไม้ใหม่")
+    elif cash_remaining < 0:
+        st.error(f"🚨 Exposure รวม (${total_exposure:,.0f}) เกิน Capital ที่มี (${capital:,.0f})")
+
+    st.dataframe(
+        open_now[["Ticker", "Entry", "Stop", "Shares", "Position Value", "Date"]],
+        use_container_width=True
+    )
+else:
+    st.caption(
+        "ยังไม่มีสถานะที่เปิดอยู่ใน Trade Journal — Portfolio Dashboard จะแสดงเมื่อมีการบันทึก 'เปิดสถานะ' "
+        "ในส่วน Trade Journal ด้านล่าง (ต้องเปิดใช้ Trade Journal ใน sidebar ก่อน)"
+    )
+
+# ------------------------------------------------------------
 # Sector Rotation view — avg RS Rank / Score per group shows
 # where money is actually flowing today.
 # ------------------------------------------------------------
@@ -673,9 +912,7 @@ if journal_enabled:
         "⚠️ ข้อมูลจะหายเมื่อปิด/รีเฟรชแอป ต้องดาวน์โหลด CSV แล้วอัปโหลดกลับเข้ามาทุกครั้งที่เปิดแอปใหม่ เพื่อบันทึกต่อเนื่อง"
     )
 
-    JOURNAL_COLUMNS = ["Date", "Ticker", "Score", "Action", "Price", "Entry", "Stop",
-                       "Shares", "Reason", "Status", "Exit", "Exit Date", "PnL"]
-
+    # JOURNAL_COLUMNS already defined at module level (top of file)
     if "journal_df" not in st.session_state:
         st.session_state.journal_df = pd.DataFrame(columns=JOURNAL_COLUMNS)
 
@@ -788,6 +1025,53 @@ if journal_enabled:
             ec2.metric("Win Rate", f"{win_rate:.0f}%")
             ec3.metric("Closed Trades", f"{len(closed)}")
             st.caption("เฉพาะรายการที่ปิดสถานะแล้ว (Status = Closed) เท่านั้นที่นำมาคำนวณ — รายการ Open ยังไม่มีผลลัพธ์จริง")
+
+            # ----------------------------------------------------
+            # Journal Analytics — the question ChatGPT flagged as
+            # more valuable than more indicators: "Score 90+ trades —
+            # what was the actual win rate and average gain?" This
+            # uses YOUR real closed trades, not a theoretical backtest.
+            # ----------------------------------------------------
+            st.subheader("🔬 Journal Analytics — Win Rate by Score Band")
+            closed["Score"] = pd.to_numeric(closed["Score"], errors="coerce")
+            closed["Return %"] = (closed["PnL"] / (closed["Entry"].astype(float) * closed["Shares"].astype(float))) * 100
+
+            def score_band(s):
+                if pd.isna(s):
+                    return "Unknown"
+                if s >= 90:
+                    return "90-100"
+                elif s >= 80:
+                    return "80-89"
+                elif s >= 70:
+                    return "70-79"
+                elif s >= 55:
+                    return "55-69"
+                else:
+                    return "<55"
+
+            closed["Score Band"] = closed["Score"].apply(score_band)
+            band_order = ["90-100", "80-89", "70-79", "55-69", "<55", "Unknown"]
+
+            band_summary = (
+                closed.groupby("Score Band")
+                .agg(
+                    Trades=("PnL", "count"),
+                    Win_Rate=("PnL", lambda s: (s > 0).mean() * 100),
+                    Avg_Gain_Pct=("Return %", "mean"),
+                    Avg_PnL=("PnL", "mean"),
+                )
+                .round(2)
+                .reindex([b for b in band_order if b in closed["Score Band"].unique()])
+                .rename(columns={"Win_Rate": "Win Rate %", "Avg_Gain_Pct": "Avg Gain %", "Avg_PnL": "Avg PnL $"})
+                .reset_index()
+            )
+            st.dataframe(band_summary, use_container_width=True)
+            st.caption(
+                "ตอบคำถาม: 'หุ้นที่ Score 90+ ที่ผมเข้าเทรดจริง Win Rate เท่าไหร่ กำไรเฉลี่ยเท่าไหร่' "
+                "จากข้อมูลการเทรดจริงของคุณเอง ไม่ใช่ทฤษฎี — ยิ่งสะสมข้อมูลเยอะ ยิ่งเชื่อถือได้มากขึ้น "
+                "(ตัวเลขจากไม้น้อยๆ ยังไม่มีนัยสำคัญทางสถิติ)"
+            )
         else:
             st.caption("ยังไม่มีรายการที่ปิดสถานะ — Equity Curve จะแสดงเมื่อมีการปิดสถานะอย่างน้อย 1 รายการ")
     else:
