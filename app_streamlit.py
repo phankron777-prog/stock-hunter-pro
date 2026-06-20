@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 from datetime import datetime
+from pathlib import Path  # <--- เพิ่มบรรทัดนี้เข้ามาครับ
 
 st.set_page_config(page_title="Stock Hunter Pro v20 Ultimate", layout="wide")
 
@@ -18,7 +19,6 @@ def load_data(ticker, period="3y"):
 
 def indicators(df, spy_close):
     df = df.copy()
-
     prev_close = df["Close"].shift(1)
     tr = pd.concat([
         df["High"] - df["Low"],
@@ -29,7 +29,6 @@ def indicators(df, spy_close):
     df["ATR"] = tr.ewm(span=14, adjust=False).mean()
     df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
     df["EMA200"] = df["Close"].ewm(span=200, adjust=False).mean()
-
     df["VolMA20"] = df["Volume"].rolling(20).mean()
     df["RVOL"] = df["Volume"] / df["VolMA20"]
 
@@ -39,7 +38,6 @@ def indicators(df, spy_close):
     df["MACDSignal"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
     stock90 = df["Close"] / df["Close"].shift(90) - 1
-
     spy = pd.DataFrame(index=df.index)
     spy["Close"] = spy_close.reindex(df.index).ffill()
     spy90 = spy["Close"] / spy["Close"].shift(90) - 1
@@ -48,30 +46,22 @@ def indicators(df, spy_close):
     df["RSRank"] = rs.rolling(252).apply(
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x.dropna()) > 0 else np.nan
     )
-
-    high20 = df["High"].rolling(20).max().shift(1)
-    df["Breakout"] = df["Close"] > high20
+    df["Breakout"] = df["Close"] > df["High"].rolling(20).max().shift(1)
 
     score = np.zeros(len(df))
-
     score += np.where(df["EMA50"] > df["EMA200"], 30, 0)
     score += np.nan_to_num(df["RSRank"] * 25)
     score += np.where(df["Breakout"], 20, 0)
-
-    score += np.where(df["RVOL"] > 2, 15,
-             np.where(df["RVOL"] > 1.5, 10,
-             np.where(df["RVOL"] > 1.2, 5, 0)))
-
+    score += np.where(df["RVOL"] > 2, 15, np.where(df["RVOL"] > 1.5, 10, np.where(df["RVOL"] > 1.2, 5, 0)))
     score += np.where(df["MACD"] > df["MACDSignal"], 10, 0)
 
     df["Score"] = score
     return df
 
+# --- UI และการประมวลผล ---
 st.sidebar.title("⚙️ Risk Settings")
 capital = st.sidebar.number_input("Capital", value=100000)
 risk_pct = st.sidebar.slider("Risk % per Trade", 0.25, 2.0, 1.0, 0.25)
-max_heat = st.sidebar.slider("Max Portfolio Heat %", 1.0, 10.0, 3.0, 0.5)
-
 selected = st.multiselect("Stocks", TICKERS, default=["NVDA","PLTR","AMD","TSLA"])
 
 st.title("🦅 Stock Hunter Pro v20 Ultimate")
@@ -84,57 +74,43 @@ market_ok = False
 if spy is not None and qqq is not None and iwm is not None:
     checks = 0
     for x in [spy, qqq, iwm]:
-        ema200 = x["Close"].ewm(span=200, adjust=False).mean().iloc[-1]
-        if x["Close"].iloc[-1] > ema200:
-            checks += 1
+        if not x.empty:
+            ema200 = x["Close"].ewm(span=200, adjust=False).mean().iloc[-1]
+            if x["Close"].iloc[-1] > ema200:
+                checks += 1
     market_ok = checks >= 2
 
 st.write(f"Market Filter: {'✅ RISK ON' if market_ok else '❌ RISK OFF'}")
 
 results = []
-
 for t in selected:
     df = load_data(t)
-    if df is None:
-        continue
-
+    if df is None: continue
     df = indicators(df, spy["Close"])
-    if len(df) < 252:
-        continue
-
+    if len(df) < 252: continue
+    
     row = df.iloc[-1]
-
     entry = float(row["Close"])
     stop = float(entry - (row["ATR"] * 2))
-
     risk_amount = capital * (risk_pct / 100)
     diff = max(entry - stop, 0.01)
-
-    shares = int(risk_amount / diff)
-    rr = round((4 * row["ATR"]) / diff, 2)
-
-    action = "BUY" if (row["Score"] >= 70 and market_ok) else "WATCH"
-
+    
     results.append({
         "Ticker": t,
-        "Action": action,
+        "Action": "BUY" if (row["Score"] >= 70 and market_ok) else "WATCH",
         "Score": round(row["Score"], 1),
         "Entry": round(entry, 2),
         "Stop": round(stop, 2),
-        "Shares": shares,
-        "Risk$": round(risk_amount, 2),
-        "RR": rr,
-        "RVOL": round(row["RVOL"], 2) if pd.notna(row["RVOL"]) else 0
+        "Shares": int(risk_amount / diff),
+        "RR": round((4 * row["ATR"]) / diff, 2)
     })
 
 if results:
-    out = pd.DataFrame(results).sort_values("Score", ascending=False)
-    st.dataframe(out, use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(results).sort_values("Score", ascending=False), use_container_width=True, hide_index=True)
 
-journal = Path("trade_journal.csv")
-if not journal.exists():
-    pd.DataFrame(columns=[
-        "Date","Ticker","Entry","Stop","Shares","Risk","Result","R"
-    ]).to_csv(journal, index=False)
+# ป้องกัน Error ของ Journal
+journal_path = Path("trade_journal.csv")
+if not journal_path.exists():
+    pd.DataFrame(columns=["Date","Ticker","Entry","Stop","Shares","Risk","Result","R"]).to_csv(journal_path, index=False)
 
 st.success("v20 Ultimate Ready")
