@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 
-st.set_page_config(page_title="Stock Hunter Pro v24", layout="wide")
+st.set_page_config(page_title="Stock Hunter Pro v25", layout="wide")
 
 # ============================================================
 # CONFIG
@@ -145,8 +145,12 @@ def indicators(df):
     # Volume
     df["RVOL"] = df["Volume"] / df["Volume"].rolling(20).mean()
 
-    # Breakout reference
-    df["High20"] = df["Close"].rolling(20).max()
+    # Breakout reference — shift(1) so "20-day high" means the highest
+    # close over the PRIOR 20 days, excluding today. Without the shift,
+    # today's own close feeds into its own rolling max, so almost any
+    # up-day falsely looks like a breakout (today's Close >= max that
+    # includes today's Close is true by construction on up-moves).
+    df["High20"] = df["Close"].rolling(20).max().shift(1)
 
     # MACD (12, 26, 9 — standard)
     ema12 = df["Close"].ewm(span=12, adjust=False).mean()
@@ -272,7 +276,9 @@ def compute_score(row, rs_rank, spy_bullish):
     breakdown["RS"] = pts
     score += pts
 
-    # Breakout (20) — at/near 20D high
+    # Breakout (20) — at/near the PRIOR 20-day high (High20 already
+    # excludes today via shift(1), so this is a real breakout check,
+    # not today's close comparing against itself).
     pts = 20 if row["Close"] >= row["High20"] * 0.99 else (10 if row["Close"] >= row["High20"] * 0.95 else 0)
     breakdown["Breakout"] = pts
     score += pts
@@ -287,8 +293,13 @@ def compute_score(row, rs_rank, spy_bullish):
     breakdown["Volume"] = pts
     score += pts
 
-    # Momentum (10) — MACD cross
-    pts = 10 if row["MACD"] > row["MACD_Signal"] else 0
+    # Momentum (10) — MACD cross AND MACD itself above zero.
+    # A MACD-above-signal cross while MACD is still negative just means
+    # "less bad than before" — it can fire during a downtrend bounce,
+    # not a confirmed uptrend. Requiring MACD > 0 too means the stock's
+    # short-term EMA is genuinely above its long-term EMA, not just
+    # decelerating its decline.
+    pts = 10 if (row["MACD"] > row["MACD_Signal"] and row["MACD"] > 0) else 0
     breakdown["Momentum"] = pts
     score += pts
 
@@ -321,19 +332,36 @@ def classify(score):
 # ============================================================
 # POSITION SIZING — Risk Per Trade vs Portfolio Heat (separated)
 # ============================================================
-def position_size(capital, entry_price, atr, risk_per_trade_pct, atr_multiple):
+def position_size(capital, entry_price, atr, risk_per_trade_pct, atr_multiple, max_position_pct=100.0):
     """
     1R = ATR * atr_multiple (stop distance)
     Risk per trade = capital * risk_per_trade_pct
     Shares = Risk per trade / stop distance
+
+    The risk-based share count alone can produce a position whose
+    dollar value exceeds available capital — this happens whenever
+    the stop is tight relative to price (e.g. a high-priced, low-ATR
+    stock), since risk-based sizing has no awareness of price itself.
+    max_position_pct caps the position's dollar value as a percentage
+    of capital (default 100% = never use leverage / never exceed
+    available cash) and shares are reduced accordingly if the
+    risk-based count would breach that cap.
     """
     stop_distance = atr * atr_multiple
-    if stop_distance <= 0:
-        return 0, 0, 0
+    if stop_distance <= 0 or entry_price <= 0:
+        return 0, 0, 0, False
+
     risk_dollars = capital * (risk_per_trade_pct / 100)
-    shares = int(risk_dollars / stop_distance)
+    shares_by_risk = int(risk_dollars / stop_distance)
+
+    max_position_value = capital * (max_position_pct / 100)
+    max_shares_by_capital = int(max_position_value / entry_price)
+
+    capped = shares_by_risk > max_shares_by_capital
+    shares = min(shares_by_risk, max_shares_by_capital)
+
     position_value = shares * entry_price
-    return shares, position_value, risk_dollars
+    return shares, position_value, risk_dollars, capped
 
 
 def trade_levels(entry_price, atr, atr_multiple, current_price=None):
@@ -386,8 +414,8 @@ def trade_levels(entry_price, atr, atr_multiple, current_price=None):
 # ============================================================
 # UI
 # ============================================================
-st.title("🦅 Stock Hunter Pro v24")
-st.caption("100-point scoring · RS Rank vs SPY · MACD · Market Regime Filter · Portfolio Heat sizing · Sector Rotation · Trailing Stop · Gap Warning · RS Line Chart · Trade Journal")
+st.title("🦅 Stock Hunter Pro v25")
+st.caption("100-point scoring · RS Rank vs SPY · MACD(0-confirmed) · Market Regime Filter · Capital-capped Sizing · Sector Rotation+Chart · Trailing Stop · Gap Warning · RS Line Chart · Trade Journal · Equity Curve")
 
 user_input = st.text_input(
     "พิมพ์ชื่อหุ้นที่ต้องการ (คั่นด้วยลูกน้ำ เช่น AAPL, MSFT, SMCI):",
@@ -409,6 +437,10 @@ with st.sidebar:
         help="ความเสี่ยงรวมทั้งพอร์ตสูงสุดที่ยอมรับได้ ถ้าพร้อมกัน"
     )
     atr_multiple = st.number_input("Stop = ATR ×", value=2.0, min_value=0.5, max_value=5.0, step=0.5)
+    max_position_pct = st.number_input(
+        "Max Position Size (% of Capital)", value=20.0, min_value=1.0, max_value=100.0, step=1.0,
+        help="จำกัดมูลค่า Position สูงสุดต่อไม้ ไม่ให้เกิน % นี้ของ Capital ทั้งหมด — ป้องกัน Risk-based sizing คำนวณ shares เยอะเกินจนเกินเงินที่มีจริง (เช่น หุ้นแพงแต่ ATR แคบ)"
+    )
 
     max_positions = int(portfolio_heat_pct / risk_per_trade_pct) if risk_per_trade_pct > 0 else 0
     st.info(f"📊 เปิดได้สูงสุด **{max_positions} ไม้** พร้อมกัน (ไม้ละ {risk_per_trade_pct:.1f}% risk, รวมไม่เกิน {portfolio_heat_pct:.1f}% heat)")
@@ -513,8 +545,8 @@ for t, df in ticker_data.items():
         direction = "⬆️" if gap["gap_pct"] > 0 else "⬇️"
         action += f" ⚠️ HIGH GAP {direction}{abs(gap['gap_pct']):.1f}%"
 
-    shares, position_value, risk_dollars = position_size(
-        capital, last["Close"], last["ATR"], risk_per_trade_pct, atr_multiple
+    shares, position_value, risk_dollars, size_capped = position_size(
+        capital, last["Close"], last["ATR"], risk_per_trade_pct, atr_multiple, max_position_pct
     )
     levels = trade_levels(last["Close"], last["ATR"], atr_multiple, current_price=last["Close"])
 
@@ -535,6 +567,7 @@ for t, df in ticker_data.items():
         "Shares (sized)": shares,
         "Position $": round(position_value, 0),
         "Risk $": round(risk_dollars, 0),
+        "Size Capped": "⚠️ Capital cap" if size_capped else "",
     })
     detail_rows[t] = breakdown
 
@@ -576,6 +609,7 @@ if not results_df.empty:
     )
     if not sector_summary.empty:
         st.dataframe(sector_summary, use_container_width=True)
+        st.bar_chart(sector_summary.set_index("Sector")["Avg RS Rank"])
         st.caption("Avg RS Rank สูง = เงินไหลเข้ากลุ่มนี้มากกว่าตลาดโดยรวม")
     else:
         st.caption("ไม่มีข้อมูล RS Rank พอสำหรับสรุปตาม Sector")
@@ -639,7 +673,8 @@ if journal_enabled:
         "⚠️ ข้อมูลจะหายเมื่อปิด/รีเฟรชแอป ต้องดาวน์โหลด CSV แล้วอัปโหลดกลับเข้ามาทุกครั้งที่เปิดแอปใหม่ เพื่อบันทึกต่อเนื่อง"
     )
 
-    JOURNAL_COLUMNS = ["Date", "Ticker", "Score", "Action", "Price", "Entry", "Stop", "Shares", "Reason"]
+    JOURNAL_COLUMNS = ["Date", "Ticker", "Score", "Action", "Price", "Entry", "Stop",
+                       "Shares", "Reason", "Status", "Exit", "Exit Date", "PnL"]
 
     if "journal_df" not in st.session_state:
         st.session_state.journal_df = pd.DataFrame(columns=JOURNAL_COLUMNS)
@@ -650,12 +685,13 @@ if journal_enabled:
     if uploaded_journal is not None:
         try:
             loaded = pd.read_csv(uploaded_journal)
-            missing = [c for c in JOURNAL_COLUMNS if c not in loaded.columns]
-            if missing:
-                st.error(f"ไฟล์ CSV ขาดคอลัมน์: {missing}")
-            else:
-                st.session_state.journal_df = loaded[JOURNAL_COLUMNS]
-                st.success(f"โหลด Trade Journal แล้ว ({len(loaded)} แถว)")
+            # Backward-compatible: old journals (v24) won't have the new
+            # Status/Exit/Exit Date/PnL columns — add them as empty/Open.
+            for col in JOURNAL_COLUMNS:
+                if col not in loaded.columns:
+                    loaded[col] = "Open" if col == "Status" else None
+            st.session_state.journal_df = loaded[JOURNAL_COLUMNS]
+            st.success(f"โหลด Trade Journal แล้ว ({len(loaded)} แถว)")
         except Exception as e:
             st.error(f"อ่านไฟล์ไม่สำเร็จ: {e}")
 
@@ -667,7 +703,7 @@ if journal_enabled:
             "เหตุผลสั้นๆ", placeholder="เช่น Breakout 20D + High Volume + RS Rank 92", key="journal_reason_input"
         )
 
-    if st.button("💾 บันทึกลง Journal", disabled=(journal_ticker not in ticker_data)):
+    if st.button("💾 บันทึกลง Journal (เปิดสถานะ)", disabled=(journal_ticker not in ticker_data)):
         row_match = results_df[results_df["Ticker"] == journal_ticker]
         if not row_match.empty:
             r = row_match.iloc[0]
@@ -682,9 +718,42 @@ if journal_enabled:
                 "Stop": lv_j["initial_stop"] if lv_j else None,
                 "Shares": r["Shares (sized)"],
                 "Reason": journal_reason,
+                "Status": "Open",
+                "Exit": None,
+                "Exit Date": None,
+                "PnL": None,
             }])
             st.session_state.journal_df = pd.concat([st.session_state.journal_df, new_entry], ignore_index=True)
-            st.success(f"บันทึก {journal_ticker} ลง Journal แล้ว")
+            st.success(f"บันทึก {journal_ticker} ลง Journal แล้ว (Open)")
+
+    # ------------------------------------------------------------
+    # Close a trade — required to compute realized P&L and plot the
+    # equity curve. Without an exit price there is no "result" to
+    # measure, so the equity curve only includes Closed trades.
+    # ------------------------------------------------------------
+    open_trades = st.session_state.journal_df[st.session_state.journal_df["Status"] == "Open"]
+    if not open_trades.empty:
+        st.markdown("**ปิดสถานะที่เปิดอยู่ (เพื่อบันทึกผลลัพธ์จริง):**")
+        oc1, oc2, oc3 = st.columns([1, 1, 1])
+        with oc1:
+            close_idx = st.selectbox(
+                "เลือกรายการที่จะปิด",
+                open_trades.index,
+                format_func=lambda i: f"{open_trades.loc[i, 'Ticker']} @ {open_trades.loc[i, 'Date']}",
+                key="close_trade_select",
+            )
+        with oc2:
+            exit_price_input = st.number_input("ราคาที่ขายจริง", value=float(open_trades.loc[close_idx, "Entry"]), step=0.5, key="exit_price_input")
+        with oc3:
+            if st.button("✅ ปิดสถานะนี้"):
+                entry_p = float(st.session_state.journal_df.loc[close_idx, "Entry"])
+                shares_n = float(st.session_state.journal_df.loc[close_idx, "Shares"]) if st.session_state.journal_df.loc[close_idx, "Shares"] else 0
+                pnl = (exit_price_input - entry_p) * shares_n
+                st.session_state.journal_df.loc[close_idx, "Exit"] = exit_price_input
+                st.session_state.journal_df.loc[close_idx, "Exit Date"] = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+                st.session_state.journal_df.loc[close_idx, "Status"] = "Closed"
+                st.session_state.journal_df.loc[close_idx, "PnL"] = round(pnl, 2)
+                st.success(f"ปิดสถานะแล้ว P&L = ${pnl:,.2f}")
 
     if not st.session_state.journal_df.empty:
         st.dataframe(st.session_state.journal_df, use_container_width=True)
@@ -695,6 +764,32 @@ if journal_enabled:
             file_name=f"trade_journal_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
             mime="text/csv",
         )
+
+        # --------------------------------------------------------
+        # Equity Curve — cumulative realized P&L over closed trades,
+        # ordered by exit date. Only Closed trades have a real P&L;
+        # Open trades aren't included since their result isn't known.
+        # --------------------------------------------------------
+        closed = st.session_state.journal_df[st.session_state.journal_df["Status"] == "Closed"].copy()
+        if not closed.empty:
+            closed["PnL"] = pd.to_numeric(closed["PnL"], errors="coerce")
+            closed = closed.dropna(subset=["PnL"])
+            closed["Exit Date"] = pd.to_datetime(closed["Exit Date"], errors="coerce")
+            closed = closed.sort_values("Exit Date")
+            closed["Cumulative PnL"] = closed["PnL"].cumsum()
+
+            st.subheader("📈 Equity Curve (Cumulative Realized P&L)")
+            equity_series = closed.set_index("Exit Date")["Cumulative PnL"]
+            st.line_chart(equity_series)
+            total_pnl = closed["PnL"].sum()
+            win_rate = (closed["PnL"] > 0).mean() * 100
+            ec1, ec2, ec3 = st.columns(3)
+            ec1.metric("Total Realized P&L", f"${total_pnl:,.2f}")
+            ec2.metric("Win Rate", f"{win_rate:.0f}%")
+            ec3.metric("Closed Trades", f"{len(closed)}")
+            st.caption("เฉพาะรายการที่ปิดสถานะแล้ว (Status = Closed) เท่านั้นที่นำมาคำนวณ — รายการ Open ยังไม่มีผลลัพธ์จริง")
+        else:
+            st.caption("ยังไม่มีรายการที่ปิดสถานะ — Equity Curve จะแสดงเมื่อมีการปิดสถานะอย่างน้อย 1 รายการ")
     else:
         st.caption("ยังไม่มีรายการบันทึก")
 
