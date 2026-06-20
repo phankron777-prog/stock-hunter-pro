@@ -1,3 +1,4 @@
+from pathlib import Path
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -80,13 +81,15 @@ spy = load_data("SPY")
 qqq = load_data("QQQ")
 iwm = load_data("IWM")
 
+# แทนที่ส่วน market_ok เดิมด้วยอันนี้ครับ
 market_ok = False
 if spy is not None and qqq is not None and iwm is not None:
     checks = 0
     for x in [spy, qqq, iwm]:
-        ema200 = x["Close"].ewm(span=200, adjust=False).mean().iloc[-1]
-        if x["Close"].iloc[-1] > ema200:
-            checks += 1
+        if x is not None and not x.empty:
+            ema200 = x["Close"].ewm(span=200, adjust=False).mean().iloc[-1]
+            if x["Close"].iloc[-1] > ema200:
+                checks += 1
     market_ok = checks >= 2
 
 st.write(f"Market Filter: {'✅ RISK ON' if market_ok else '❌ RISK OFF'}")
