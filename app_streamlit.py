@@ -3,13 +3,33 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 
-st.set_page_config(page_title="Stock Hunter Pro v22", layout="wide")
+st.set_page_config(page_title="Stock Hunter Pro v23", layout="wide")
 
 # ============================================================
 # CONFIG
 # ============================================================
 BENCHMARK = "SPY"
 EARNINGS_BLACKOUT_DAYS = 7  # ผู้ใช้ขอเปลี่ยนจาก 0-3 วัน เป็น 7 วัน
+
+# Sector / theme groupings — used for Sector Rotation view (avg RS Rank
+# per group tells you where money is actually flowing). Extend freely;
+# any ticker not listed here falls into "Other".
+SECTOR_TICKERS = {
+    "SEMI": ["NVDA", "AMD", "AVGO", "TSM", "SMCI", "MU", "QCOM", "INTC", "ARM"],
+    "MEGA_TECH": ["AAPL", "MSFT", "GOOGL", "GOOG", "META", "AMZN"],
+    "AI_SOFTWARE": ["PLTR", "CRM", "NOW", "SNOW", "AI", "PATH"],
+    "EV_AUTO": ["TSLA", "RIVN", "LCID", "F", "GM"],
+    "FINANCE": ["JPM", "BAC", "GS", "MS", "V", "MA"],
+    "ENERGY": ["XOM", "CVX", "OXY", "SLB"],
+    "HEALTHCARE": ["UNH", "LLY", "JNJ", "PFE", "ABBV"],
+}
+
+
+def get_sector(ticker):
+    for sector, members in SECTOR_TICKERS.items():
+        if ticker in members:
+            return sector
+    return "Other"
 
 # ============================================================
 # DATA LOADING
@@ -142,6 +162,16 @@ def rs_rank_from_universe(raw_rel_scores: dict):
 # ============================================================
 # SCORING — 100 point system
 # ============================================================
+def is_choppy(row):
+    """
+    Hard volatility/volume gate. If RVOL <= 1.0, "no one is trading this"
+    today — ATR can look tight and R:R can look great on paper while the
+    move has no real participation behind it. Stocks that fail this gate
+    are force-capped regardless of how good the rest of the score looks.
+    """
+    return row["RVOL"] <= 1.0
+
+
 def compute_score(row, rs_rank, spy_bullish):
     """
     Trend            EMA50 > EMA200            = 20
@@ -152,6 +182,10 @@ def compute_score(row, rs_rank, spy_bullish):
     Market Filter    SPY > EMA200               = 10
     ------------------------------------------------
     Total                                       = 100
+
+    Hard gate: RVOL <= 1.0 caps the total score regardless of other
+    factors (see is_choppy). This stops "great score, no volume" chop
+    days from showing up as BUY/ELITE BUY.
     """
     score = 0
     breakdown = {}
@@ -202,6 +236,13 @@ def compute_score(row, rs_rank, spy_bullish):
     breakdown["Market"] = pts
     score += pts
 
+    # Hard chop gate — RVOL <= 1.0 means no real participation today.
+    # Cap the score so it can never read as BUY/ELITE BUY on paper-only setups.
+    chopped = is_choppy(row)
+    if chopped:
+        score = min(score, 40)
+
+    breakdown["Chop Capped"] = chopped
     return score, breakdown
 
 
@@ -234,11 +275,58 @@ def position_size(capital, entry_price, atr, risk_per_trade_pct, atr_multiple):
     return shares, position_value, risk_dollars
 
 
+def trade_levels(entry_price, atr, atr_multiple, current_price=None):
+    """
+    Initial Stop      = entry - 1R
+    1R                = atr * atr_multiple
+    Break-even Trigger = entry + 2R  (move stop to entry once hit)
+    Trailing logic     = once price >= entry + 2R, recommended stop
+                          becomes break-even (entry price); beyond that
+                          a simple chandelier-style trail (current - 1R)
+                          can be used to lock in further gains.
+    If current_price is supplied, also returns how many R the trade
+    is currently up and the recommended stop given that progress.
+    """
+    r = atr * atr_multiple
+    if r <= 0:
+        return None
+
+    initial_stop = entry_price - r
+    breakeven_trigger = entry_price + 2 * r  # move stop to BE at +2R
+
+    levels = {
+        "1R_distance": round(r, 2),
+        "initial_stop": round(initial_stop, 2),
+        "breakeven_trigger_price": round(breakeven_trigger, 2),
+        "breakeven_stop": round(entry_price, 2),
+    }
+
+    if current_price is not None:
+        r_multiple = (current_price - entry_price) / r if r > 0 else 0
+        levels["current_R"] = round(r_multiple, 2)
+
+        if current_price >= breakeven_trigger:
+            # At/above +2R: stop trails at break-even or better,
+            # using a simple chandelier trail (current price - 1R)
+            # whichever is higher, so it never gives back below BE.
+            trail_stop = max(entry_price, current_price - r)
+            levels["recommended_stop"] = round(trail_stop, 2)
+            levels["stop_stage"] = "🔒 TRAILING (≥2R — stop at/above break-even)"
+        elif current_price > entry_price:
+            levels["recommended_stop"] = round(initial_stop, 2)
+            levels["stop_stage"] = "⏳ INITIAL (below +2R — keep original stop)"
+        else:
+            levels["recommended_stop"] = round(initial_stop, 2)
+            levels["stop_stage"] = "⚠️ UNDER WATER (below entry)"
+
+    return levels
+
+
 # ============================================================
 # UI
 # ============================================================
-st.title("🦅 Stock Hunter Pro v22")
-st.caption("100-point scoring · RS Rank vs SPY · MACD · Market Regime Filter · Portfolio Heat sizing")
+st.title("🦅 Stock Hunter Pro v23")
+st.caption("100-point scoring · RS Rank vs SPY · MACD · Market Regime Filter · Portfolio Heat sizing · Sector Rotation · Trailing Stop")
 
 user_input = st.text_input(
     "พิมพ์ชื่อหุ้นที่ต้องการ (คั่นด้วยลูกน้ำ เช่น AAPL, MSFT, SMCI):",
@@ -337,15 +425,20 @@ for t, df in ticker_data.items():
     shares, position_value, risk_dollars = position_size(
         capital, last["Close"], last["ATR"], risk_per_trade_pct, atr_multiple
     )
+    levels = trade_levels(last["Close"], last["ATR"], atr_multiple, current_price=last["Close"])
 
     results.append({
         "Ticker": t,
+        "Sector": get_sector(t),
         "Action": action,
         "Score": round(score, 1),
         "RS Rank": round(rs_rank, 1) if not np.isnan(rs_rank) else None,
         "Price": round(last["Close"], 2),
         "ATR": round(last["ATR"], 2),
+        "RVOL": round(last["RVOL"], 2),
         "Earnings In": f"{days_to_earnings}d" if days_to_earnings is not None else "—",
+        "Initial Stop": levels["initial_stop"] if levels else None,
+        "BE Trigger (+2R)": levels["breakeven_trigger_price"] if levels else None,
         "Shares (sized)": shares,
         "Position $": round(position_value, 0),
         "Risk $": round(risk_dollars, 0),
@@ -357,19 +450,73 @@ results_df = pd.DataFrame(results).sort_values("Score", ascending=False).reset_i
 st.dataframe(results_df, use_container_width=True)
 
 # ------------------------------------------------------------
+# Sector Rotation view — avg RS Rank / Score per group shows
+# where money is actually flowing today.
+# ------------------------------------------------------------
+if not results_df.empty:
+    st.subheader("🔄 Sector Rotation")
+    sector_summary = (
+        results_df.dropna(subset=["RS Rank"])
+        .groupby("Sector")
+        .agg(
+            Tickers=("Ticker", "count"),
+            **{"Avg RS Rank": ("RS Rank", "mean")},
+            **{"Avg Score": ("Score", "mean")},
+        )
+        .sort_values("Avg RS Rank", ascending=False)
+        .round(1)
+        .reset_index()
+    )
+    if not sector_summary.empty:
+        st.dataframe(sector_summary, use_container_width=True)
+        st.caption("Avg RS Rank สูง = เงินไหลเข้ากลุ่มนี้มากกว่าตลาดโดยรวม")
+    else:
+        st.caption("ไม่มีข้อมูล RS Rank พอสำหรับสรุปตาม Sector")
+
+# ------------------------------------------------------------
+# Trailing Stop / Break-even Tracker — for positions already open
+# ------------------------------------------------------------
+st.subheader("🎯 Break-even / Trailing Stop Tracker")
+st.caption("ใส่ราคาที่เข้าซื้อจริง เพื่อดูว่าควรขยับ Stop ไปที่ไหนตามความคืบหน้าของเทรด (กฎ: ถึง +2R → ขยับ Stop เป็น Break-even หรือดีกว่า)")
+
+trackable = [t for t in results_df["Ticker"] if t in ticker_data]
+if trackable:
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        track_ticker = st.selectbox("เลือกหุ้น", trackable)
+    with col2:
+        default_entry = float(ticker_data[track_ticker]["Close"].iloc[-1])
+        entry_price_input = st.number_input(
+            f"ราคาที่เข้าซื้อจริงสำหรับ {track_ticker}", value=default_entry, step=0.5
+        )
+
+    last_row = ticker_data[track_ticker].iloc[-1]
+    lv = trade_levels(entry_price_input, last_row["ATR"], atr_multiple, current_price=last_row["Close"])
+
+    if lv:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("ราคาปัจจุบัน", f"${last_row['Close']:.2f}")
+        c2.metric("กำไรตอนนี้ (R)", f"{lv['current_R']}R")
+        c3.metric("Stop ที่แนะนำตอนนี้", f"${lv['recommended_stop']:.2f}")
+        c4.metric("จุด Trigger Break-even (+2R)", f"${lv['breakeven_trigger_price']:.2f}")
+        st.info(f"สถานะ: **{lv['stop_stage']}**")
+
+# ------------------------------------------------------------
 # Score breakdown expander
 # ------------------------------------------------------------
 with st.expander("🔍 Score Breakdown (per ticker)"):
     for t in results_df["Ticker"]:
         b = detail_rows[t]
+        chop_note = " ⚠️ **RVOL≤1.0 — score capped at 40 (chop/no participation)**" if b.get("Chop Capped") else ""
         st.markdown(
             f"**{t}** — Trend {b['Trend']}/20 · RS {b['RS']}/25 · Breakout {b['Breakout']}/20 · "
             f"Volume {b['Volume']}/15 · Momentum {b['Momentum']}/10 · Market {b['Market']}/10 "
-            f"→ **Total {sum(b.values())}/100**"
+            f"→ **Total {sum(v for k,v in b.items() if k != 'Chop Capped')}/100**{chop_note}"
         )
 
 st.divider()
 st.caption(
-    "Scoring: Trend 20 · RS Rank 25 · Breakout 20 · Volume 15 · Momentum (MACD) 10 · Market Filter 10 = 100 pts | "
+    "Scoring: Trend 20 · RS Rank 25 · Breakout 20 · Volume 15 · Momentum (MACD) 10 · Market Filter 10 = 100 pts "
+    "(capped at 40 if RVOL≤1.0 — chop guard) | "
     "85+ ELITE BUY · 70-84 BUY · 55-69 WATCH · <55 AVOID"
 )
