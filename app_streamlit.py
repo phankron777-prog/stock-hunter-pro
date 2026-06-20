@@ -2,98 +2,68 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime
 from pathlib import Path
 
-st.set_page_config(page_title="Stock Hunter Pro v20.5", layout="wide")
+st.set_page_config(page_title="Stock Hunter Pro v21", layout="wide")
 
-TICKERS = ["NVDA","PLTR","AMD","TSLA","META","AAPL","MSFT","GOOGL","AMZN","NFLX","COIN","ASTS"]
+# --- 1. ฟังก์ชันคำนวณสถิติ (Expectancy & Performance) ---
+def get_performance_metrics(journal_df):
+    if journal_df.empty: return 0, 0, 0
+    wins = journal_df[journal_df['R'] > 0]
+    losses = journal_df[journal_df['R'] <= 0]
+    win_rate = len(wins) / len(journal_df)
+    profit_factor = abs(wins['R'].sum() / losses['R'].sum()) if losses['R'].sum() != 0 else 99
+    expectancy = (win_rate * (wins['R'].mean() if not wins.empty else 0)) - ((1-win_rate) * abs(losses['R'].mean() if not losses.empty else 0))
+    return win_rate, profit_factor, expectancy
 
-@st.cache_data(ttl=3600)
-def load_data(ticker, period="3y"):
-    try:
-        df = yf.Ticker(ticker).history(period=period, auto_adjust=True)
-        return None if df.empty else df
-    except:
-        return None
-
-def indicators(df, spy_close):
+# --- 2. Indicators & Scoring v21 ---
+def indicators(df):
     df = df.copy()
-    prev_close = df["Close"].shift(1)
-    tr = pd.concat([
-        df["High"] - df["Low"],
-        (df["High"] - prev_close).abs(),
-        (df["Low"] - prev_close).abs()
-    ], axis=1).max(axis=1)
-
-    df["ATR"] = tr.ewm(span=14, adjust=False).mean()
-    df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
-    df["EMA200"] = df["Close"].ewm(span=200, adjust=False).mean()
-    df["VolMA20"] = df["Volume"].rolling(20).mean()
-    df["RVOL"] = df["Volume"] / df["VolMA20"]
+    df["ATR"] = pd.concat([df["High"]-df["Low"], (df["High"]-df["Close"].shift(1)).abs(), (df["Low"]-df["Close"].shift(1)).abs()], axis=1).max(axis=1).ewm(span=14).mean()
+    df["EMA50"] = df["Close"].ewm(span=50).mean()
+    df["EMA200"] = df["Close"].ewm(span=200).mean()
+    df["RVOL"] = df["Volume"] / df["Volume"].rolling(20).mean()
     
-    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = ema12 - ema26
-    df["MACDSignal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    
-    stock90 = df["Close"] / df["Close"].shift(90) - 1
-    spy = pd.DataFrame(index=df.index)
-    spy["Close"] = spy_close.reindex(df.index).ffill()
-    spy90 = spy["Close"] / spy["Close"].shift(90) - 1
-    rs = stock90 - spy90
-    df["RSRank"] = rs.rolling(252).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x.dropna()) > 0 else np.nan)
-    df["Breakout"] = df["Close"] > df["High"].rolling(20).max().shift(1)
-    
-    # Score calculation
+    # Score Engine
     score = np.zeros(len(df))
     score += np.where(df["EMA50"] > df["EMA200"], 30, 0)
-    score += np.nan_to_num(df["RSRank"] * 25)
-    score += np.where(df["Breakout"], 20, 0)
-    score += np.where(df["RVOL"] > 1.5, 10, np.where(df["RVOL"] > 1.2, 5, 0))
-    score += np.where(df["MACD"] > df["MACDSignal"], 10, 0)
+    score += np.where(df["Close"] > df["High"].rolling(20).max().shift(1), 20, 0)
+    score += np.where(df["RVOL"] > 1.5, 15, 10)
     df["Score"] = score
     return df
 
-# UI
-st.title("🦅 Stock Hunter Pro v20.5")
+# --- 3. UI & Main Logic ---
+st.title("🦅 Stock Hunter Pro v21")
 capital = st.sidebar.number_input("Capital", value=100000)
-risk_pct = st.sidebar.slider("Risk % per Trade", 0.25, 2.0, 1.0, 0.25)
-selected = st.multiselect("Stocks", TICKERS, default=["NVDA","PLTR","AMD"])
+max_heat = st.sidebar.slider("Max Portfolio Heat %", 1.0, 5.0, 3.0)
 
-spy = load_data("SPY")
-market_ok = False
-if spy is not None:
-    ema200 = spy["Close"].ewm(span=200, adjust=False).mean().iloc[-1]
-    market_ok = spy["Close"].iloc[-1] > ema200
-st.write(f"Market Filter: {'✅ RISK ON' if market_ok else '❌ RISK OFF'}")
-
-results = []
-for t in selected:
-    df = load_data(t)
-    if df is None or len(df) < 252: continue
-    df = indicators(df, spy["Close"])
-    
-    signal_row = df.iloc[-2] # ใช้แถวก่อนหน้าตัดสินใจ
-    live_row = df.iloc[-1]   # ใช้แถวล่าสุดแสดงผลราคา
-    
-    entry = float(live_row["Close"])
-    diff = max(signal_row["Close"] - (signal_row["Close"] - (signal_row["ATR"] * 2)), 0.01)
-    
-    shares = int(min((capital * (risk_pct / 100)) / diff, capital / entry))
-    
-    results.append({
-        "Ticker": t,
-        "Action": "BUY" if (signal_row["Score"] >= 70 and market_ok) else "WATCH",
-        "Score": round(signal_row["Score"], 1),
-        "Price": round(entry, 2),
-        "Shares": shares,
-        "RVOL": round(live_row["RVOL"], 2)
-    })
-
-if results:
-    st.dataframe(pd.DataFrame(results), use_container_width=True)
-
+# Load Journal
 journal_path = Path("trade_journal.csv")
-if not journal_path.exists():
-    pd.DataFrame(columns=["Date","Ticker","Entry","Shares"]).to_csv(journal_path, index=False)
+journal_df = pd.read_csv(journal_path) if journal_path.exists() else pd.DataFrame(columns=["Ticker","R"])
+
+# แสดง Dashboard สรุปผล
+wr, pf, exp = get_performance_metrics(journal_df)
+c1, c2, c3 = st.columns(3)
+c1.metric("Win Rate", f"{wr:.1%}")
+c2.metric("Profit Factor", f"{pf:.2f}")
+c3.metric("Expectancy (R)", f"{exp:.2f}")
+
+# สแกนหุ้น (ใช้ signal_row = iloc[-2])
+results = []
+for t in ["NVDA", "PLTR", "AMD", "TSLA"]:
+    df = indicators(yf.Ticker(t).history(period="1y"))
+    signal = df.iloc[-2] # <--- ใช้ข้อมูลก่อนปิดแท่งล่าสุด
+    
+    score = signal["Score"]
+    if score >= 75: action = "🚀 STRONG BUY"
+    elif score >= 60: action = "🔥 BUY"
+    elif score >= 45: action = "👀 WATCH"
+    else: action = "❌ AVOID"
+    
+    # คำนวณ Size ตาม Max Heat
+    diff = signal["ATR"] * 2
+    shares = int(min((capital * (max_heat/100)) / diff, capital / signal["Close"]))
+    
+    results.append({"Ticker": t, "Action": action, "Score": score, "Shares": shares})
+
+st.dataframe(pd.DataFrame(results), use_container_width=True)
