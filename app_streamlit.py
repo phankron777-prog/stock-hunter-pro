@@ -51,19 +51,34 @@ st.write(f"Market Filter (2/3): {'✅ RISK ON' if market_ok else '❌ RISK OFF'}
 results = []
 summary = {"🚀 STRONG BUY": 0, "🔥 BUY": 0, "👀 WATCH": 0}
 
-for t in selected:
-    df, earnings = load_data(t)
-    if df is None: continue
-    df = indicators(df, yf.Ticker("SPY").history(period="1y")["Close"])
+# แก้ไขส่วนสรุปผลลัพธ์ในลูป for t in selected:
+    # ... (โค้ดคำนวณ signal และ score ของเดิม) ...
     
-    signal = df.iloc[-2]
-    score = signal["Score"]
+    # ปรับ Logic: ให้แสดงทุกตัวที่สแกน ไม่ใช่แค่ตัวที่ BUY
+    if signal["Score"] >= 75: action = "🚀 STRONG BUY"
+    elif signal["Score"] >= 60: action = "🔥 BUY"
+    elif signal["Score"] >= 45: action = "👀 WATCH"
+    else: action = "❌ AVOID"
     
-    # 2. Earnings Filter
-    is_earnings = False
-    if earnings:
-        days_to_earnings = (earnings - pd.Timestamp.now()).days
-        if 0 <= days_to_earnings <= 3: is_earnings = True
+    # เพิ่มตัวนี้เพื่อให้ Dashboard สรุปผลอัปเดต
+    summary[action] = summary.get(action, 0) + 1
+    
+    # เก็บข้อมูลลง results เพื่อแสดงในตาราง
+    results.append({
+        "Ticker": t, 
+        "Action": f"{action} {'⚠️ EARNINGS' if is_earnings else ''}",
+        "Score": round(score, 1), 
+        "Shares": shares
+    })
+
+# เพิ่มส่วนนี้ก่อนแสดงตาราง เพื่อให้ Dashboard แสดงตัวเลขที่ถูกต้อง
+summary_df = pd.DataFrame([summary])
+c1, c2, c3 = st.columns(3)
+c1.metric("Strong Buy", summary.get("🚀 STRONG BUY", 0))
+c2.metric("Buy", summary.get("🔥 BUY", 0))
+c3.metric("Watch", summary.get("👀 WATCH", 0))
+
+st.table(pd.DataFrame(results))
 
     if score >= 75: action = "🚀 STRONG BUY"
     elif score >= 60: action = "🔥 BUY"
