@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 
-st.set_page_config(page_title="Stock Hunter Pro v23", layout="wide")
+st.set_page_config(page_title="Stock Hunter Pro v24", layout="wide")
 
 # ============================================================
 # CONFIG
@@ -61,6 +61,67 @@ def load_earnings_date(ticker):
         return next_date.date(), days_to
     except Exception:
         return None, None
+
+
+@st.cache_data(ttl=300)  # 5-min cache — short enough to stay reasonably fresh intraday
+def load_live_price(ticker):
+    """
+    Best-effort fetch of the most current tradable price (regular session,
+    pre-market, or post-market), used only to detect gaps vs yesterday's
+    close. yfinance's free data is delayed (~15 min, sometimes more) and
+    pre/post-market fields are not guaranteed to be populated for every
+    ticker — this is NOT true real-time data. Returns:
+        (live_price, source_label) or (None, None) if nothing usable.
+    """
+    try:
+        t = yf.Ticker(ticker)
+        fi = t.fast_info
+        live = None
+        source = None
+
+        # fast_info.last_price is usually the most current trade price
+        # yfinance can obtain (often includes pre/post market).
+        last_price = getattr(fi, "last_price", None)
+        if last_price:
+            live = float(last_price)
+            source = "last trade (delayed ~15min+)"
+
+        # Try to get explicit pre/post market fields for a clearer label
+        info = {}
+        try:
+            info = t.info or {}
+        except Exception:
+            info = {}
+
+        pre = info.get("preMarketPrice")
+        post = info.get("postMarketPrice")
+        market_state = info.get("marketState", "")
+
+        if market_state == "PRE" and pre:
+            live = float(pre)
+            source = "pre-market (delayed)"
+        elif market_state in ("POST", "POSTPOST") and post:
+            live = float(post)
+            source = "post-market (delayed)"
+        elif market_state == "REGULAR" and last_price:
+            source = "regular session (delayed ~15min+)"
+
+        if live is None:
+            return None, None
+        return live, source
+    except Exception:
+        return None, None
+
+
+def detect_gap(prev_close, live_price, threshold_pct=3.0):
+    """
+    Compare live/extended-hours price to the most recent daily close.
+    Returns (gap_pct, is_high_gap).
+    """
+    if prev_close is None or live_price is None or prev_close == 0:
+        return None, False
+    gap_pct = (live_price - prev_close) / prev_close * 100
+    return round(gap_pct, 2), abs(gap_pct) >= threshold_pct
 
 
 # ============================================================
@@ -325,8 +386,8 @@ def trade_levels(entry_price, atr, atr_multiple, current_price=None):
 # ============================================================
 # UI
 # ============================================================
-st.title("🦅 Stock Hunter Pro v23")
-st.caption("100-point scoring · RS Rank vs SPY · MACD · Market Regime Filter · Portfolio Heat sizing · Sector Rotation · Trailing Stop")
+st.title("🦅 Stock Hunter Pro v24")
+st.caption("100-point scoring · RS Rank vs SPY · MACD · Market Regime Filter · Portfolio Heat sizing · Sector Rotation · Trailing Stop · Gap Warning · RS Line Chart · Trade Journal")
 
 user_input = st.text_input(
     "พิมพ์ชื่อหุ้นที่ต้องการ (คั่นด้วยลูกน้ำ เช่น AAPL, MSFT, SMCI):",
@@ -361,6 +422,16 @@ with st.sidebar:
         "Earnings Blackout (วัน)", value=EARNINGS_BLACKOUT_DAYS, min_value=0, max_value=30, step=1,
         help="ซ่อน/เตือนหุ้นที่มี Earnings ภายในกี่วันข้างหน้า"
     )
+    gap_threshold_pct = st.number_input(
+        "Gap Warning Threshold (%)", value=3.0, min_value=0.5, max_value=20.0, step=0.5,
+        help="ถ้าราคาล่าสุด (pre/post market หรือ delayed) ต่างจากราคาปิดเมื่อวานเกินกี่ % ให้ขึ้นเตือน HIGH GAP"
+    )
+
+    st.subheader("📓 Trade Journal")
+    journal_enabled = st.checkbox(
+        "เปิดใช้ Trade Journal (บันทึกลง CSV)", value=True,
+        help="บันทึก Score/Action ณ วันที่ตัดสินใจ พร้อมเหตุผล เพื่อย้อนกลับมาดูผลลัพธ์ภายหลัง"
+    )
 
 # ------------------------------------------------------------
 # Load benchmark (SPY) once
@@ -381,6 +452,8 @@ if not spy_bullish:
 # ------------------------------------------------------------
 ticker_data = {}
 raw_rel_scores = {}
+rs_lines = {}        # ticker -> RS line series (stock/SPY ratio), for charting
+gap_info = {}        # ticker -> (gap_pct, is_high_gap, live_price, source_label)
 
 for t in tickers:
     df = load_data(t)
@@ -390,10 +463,23 @@ for t in tickers:
     ticker_data[t] = df
 
     if spy_df is not None:
-        _, rel_score = relative_strength_series(df["Close"], spy_df["Close"])
+        rs_line, rel_score = relative_strength_series(df["Close"], spy_df["Close"])
         raw_rel_scores[t] = rel_score
+        rs_lines[t] = rs_line
     else:
         raw_rel_scores[t] = np.nan
+        rs_lines[t] = None
+
+    prev_close = float(df["Close"].iloc[-1])
+    live_price, source = load_live_price(t)
+    gap_pct, is_high_gap = detect_gap(prev_close, live_price, threshold_pct=gap_threshold_pct)
+    gap_info[t] = {
+        "prev_close": prev_close,
+        "live_price": live_price,
+        "source": source,
+        "gap_pct": gap_pct,
+        "is_high_gap": is_high_gap,
+    }
 
 rs_ranks = rs_rank_from_universe(raw_rel_scores)
 
@@ -422,6 +508,11 @@ for t, df in ticker_data.items():
         if in_blackout:
             action += " ⚠️ EARNINGS SOON"
 
+    gap = gap_info.get(t, {})
+    if gap.get("is_high_gap"):
+        direction = "⬆️" if gap["gap_pct"] > 0 else "⬇️"
+        action += f" ⚠️ HIGH GAP {direction}{abs(gap['gap_pct']):.1f}%"
+
     shares, position_value, risk_dollars = position_size(
         capital, last["Close"], last["ATR"], risk_per_trade_pct, atr_multiple
     )
@@ -433,7 +524,9 @@ for t, df in ticker_data.items():
         "Action": action,
         "Score": round(score, 1),
         "RS Rank": round(rs_rank, 1) if not np.isnan(rs_rank) else None,
-        "Price": round(last["Close"], 2),
+        "Price (Close)": round(last["Close"], 2),
+        "Live/Pre-Post Price": round(gap["live_price"], 2) if gap.get("live_price") else None,
+        "Gap %": gap.get("gap_pct"),
         "ATR": round(last["ATR"], 2),
         "RVOL": round(last["RVOL"], 2),
         "Earnings In": f"{days_to_earnings}d" if days_to_earnings is not None else "—",
@@ -448,6 +541,20 @@ for t, df in ticker_data.items():
 results_df = pd.DataFrame(results).sort_values("Score", ascending=False).reset_index(drop=True)
 
 st.dataframe(results_df, use_container_width=True)
+
+# Honest disclosure about data freshness for the gap feature
+st.caption(
+    "⚠️ \"Live/Pre-Post Price\" มาจาก yfinance แบบ best-effort (มักดีเลย์ 15+ นาที และไม่ใช่ทุกหุ้นที่มีราคา pre/post-market "
+    "ครบ) ใช้เพื่อ **เตือน** ว่าราคาน่าจะกระโดดไปจากปิดเมื่อวานเท่านั้น ไม่ใช่ราคาที่ใช้คำนวณ Entry/Stop จริง — "
+    "ก่อนส่งคำสั่งจริงควรเช็คราคาจาก broker/platform ของคุณอีกที"
+)
+
+high_gap_tickers = [r["Ticker"] for r in results if gap_info.get(r["Ticker"], {}).get("is_high_gap")]
+if high_gap_tickers:
+    st.warning(
+        f"⚠️ HIGH GAP: {', '.join(high_gap_tickers)} — ราคาล่าสุดต่างจากปิดเมื่อวานเกิน {gap_threshold_pct:.1f}% "
+        "ระวังการไล่ราคา (FOMO) ตำแหน่ง Entry/Stop ที่คำนวณจากราคาปิดอาจไม่ทันสถานการณ์แล้ว"
+    )
 
 # ------------------------------------------------------------
 # Sector Rotation view — avg RS Rank / Score per group shows
@@ -472,6 +579,25 @@ if not results_df.empty:
         st.caption("Avg RS Rank สูง = เงินไหลเข้ากลุ่มนี้มากกว่าตลาดโดยรวม")
     else:
         st.caption("ไม่มีข้อมูล RS Rank พอสำหรับสรุปตาม Sector")
+
+# ------------------------------------------------------------
+# RS Line chart — stock/SPY ratio over time. Rising = stock leading
+# the market; falling = stock losing relative strength, often BEFORE
+# price itself rolls over.
+# ------------------------------------------------------------
+st.subheader("📈 Relative Strength (RS) Line vs SPY")
+chartable = [t for t in results_df["Ticker"] if rs_lines.get(t) is not None]
+if chartable:
+    rs_chart_ticker = st.selectbox("เลือกหุ้นเพื่อดู RS Line", chartable, key="rs_chart_select")
+    rs_series = rs_lines[rs_chart_ticker].copy()
+    rs_series.name = f"{rs_chart_ticker}/SPY"
+    st.line_chart(rs_series)
+    st.caption(
+        "เส้นพุ่งขึ้น = หุ้นแข็งแกร่งกว่า SPY (เงินไหลเข้า) · เส้นหักหัวลง = หุ้นเริ่มอ่อนแรงเทียบตลาด "
+        "มักเป็นสัญญาณเตือนล่วงหน้าก่อนราคาจริงจะร่วง"
+    )
+else:
+    st.caption("ไม่มีข้อมูล RS Line (ต้องมีข้อมูล SPY และหุ้นที่เลือกพร้อมกัน)")
 
 # ------------------------------------------------------------
 # Trailing Stop / Break-even Tracker — for positions already open
@@ -500,6 +626,77 @@ if trackable:
         c3.metric("Stop ที่แนะนำตอนนี้", f"${lv['recommended_stop']:.2f}")
         c4.metric("จุด Trigger Break-even (+2R)", f"${lv['breakeven_trigger_price']:.2f}")
         st.info(f"สถานะ: **{lv['stop_stage']}**")
+
+# ------------------------------------------------------------
+# Trade Journal — log the decision (Score/Action/reason) at the
+# moment of the trade, so you can later answer: "Stocks I traded
+# at Score 85+ — how did they actually do?"
+# ------------------------------------------------------------
+if journal_enabled:
+    st.subheader("📓 Trade Journal")
+    st.caption(
+        "บันทึก Score/Action ณ วันที่ตัดสินใจ พร้อมเหตุผลสั้นๆ — ดาวน์โหลดเป็น CSV เก็บไว้เอง "
+        "⚠️ ข้อมูลจะหายเมื่อปิด/รีเฟรชแอป ต้องดาวน์โหลด CSV แล้วอัปโหลดกลับเข้ามาทุกครั้งที่เปิดแอปใหม่ เพื่อบันทึกต่อเนื่อง"
+    )
+
+    JOURNAL_COLUMNS = ["Date", "Ticker", "Score", "Action", "Price", "Entry", "Stop", "Shares", "Reason"]
+
+    if "journal_df" not in st.session_state:
+        st.session_state.journal_df = pd.DataFrame(columns=JOURNAL_COLUMNS)
+
+    uploaded_journal = st.file_uploader(
+        "อัปโหลด Trade Journal เดิม (CSV) เพื่อบันทึกต่อ — ไม่บังคับ", type=["csv"], key="journal_upload"
+    )
+    if uploaded_journal is not None:
+        try:
+            loaded = pd.read_csv(uploaded_journal)
+            missing = [c for c in JOURNAL_COLUMNS if c not in loaded.columns]
+            if missing:
+                st.error(f"ไฟล์ CSV ขาดคอลัมน์: {missing}")
+            else:
+                st.session_state.journal_df = loaded[JOURNAL_COLUMNS]
+                st.success(f"โหลด Trade Journal แล้ว ({len(loaded)} แถว)")
+        except Exception as e:
+            st.error(f"อ่านไฟล์ไม่สำเร็จ: {e}")
+
+    jc1, jc2 = st.columns([1, 2])
+    with jc1:
+        journal_ticker = st.selectbox("หุ้นที่จะบันทึก", trackable if trackable else ["—"], key="journal_ticker_select")
+    with jc2:
+        journal_reason = st.text_input(
+            "เหตุผลสั้นๆ", placeholder="เช่น Breakout 20D + High Volume + RS Rank 92", key="journal_reason_input"
+        )
+
+    if st.button("💾 บันทึกลง Journal", disabled=(journal_ticker not in ticker_data)):
+        row_match = results_df[results_df["Ticker"] == journal_ticker]
+        if not row_match.empty:
+            r = row_match.iloc[0]
+            lv_j = trade_levels(r["Price (Close)"], ticker_data[journal_ticker]["ATR"].iloc[-1], atr_multiple)
+            new_entry = pd.DataFrame([{
+                "Date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+                "Ticker": journal_ticker,
+                "Score": r["Score"],
+                "Action": r["Action"],
+                "Price": r["Price (Close)"],
+                "Entry": r["Price (Close)"],
+                "Stop": lv_j["initial_stop"] if lv_j else None,
+                "Shares": r["Shares (sized)"],
+                "Reason": journal_reason,
+            }])
+            st.session_state.journal_df = pd.concat([st.session_state.journal_df, new_entry], ignore_index=True)
+            st.success(f"บันทึก {journal_ticker} ลง Journal แล้ว")
+
+    if not st.session_state.journal_df.empty:
+        st.dataframe(st.session_state.journal_df, use_container_width=True)
+        csv_bytes = st.session_state.journal_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "⬇️ ดาวน์โหลด Trade Journal (CSV)",
+            data=csv_bytes,
+            file_name=f"trade_journal_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+        )
+    else:
+        st.caption("ยังไม่มีรายการบันทึก")
 
 # ------------------------------------------------------------
 # Score breakdown expander
