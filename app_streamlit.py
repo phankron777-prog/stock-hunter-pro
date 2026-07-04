@@ -711,6 +711,10 @@ st.caption(
     "ไม่มีระบบใดพยากรณ์ราคาได้แม่นยำ 100% — ใช้ประกอบการตัดสินใจ ไม่ใช่คำแนะนำการลงทุน "
     "และควรทดสอบ (ดูแท็บ Backtest) ก่อนใช้เงินจริงเสมอ"
 )
+st.caption(
+    "ℹ️ Score/Action ที่แสดง คือผลจากกฎคงที่ ไม่ใช่สัญญาณซื้อขายอัตโนมัติและไม่ใช่ความน่าจะเป็นที่พิสูจน์แล้ว "
+    "— ก่อนเข้าไม้จริงควรยืนยันด้วย Backtest, ข่าว/ปัจจัยพื้นฐาน และดุลยพินิจของคุณเองเสมอ"
+)
 
 with st.sidebar:
     st.header("⚙️ Settings")
@@ -943,7 +947,28 @@ for t, df in ticker_data.items():
 
 results_df = pd.DataFrame(results).sort_values("Score", ascending=False).reset_index(drop=True)
 
-st.dataframe(results_df, use_container_width=True)
+st.dataframe(
+    results_df,
+    use_container_width=True,
+    column_config={
+        "RS Rank": st.column_config.NumberColumn(
+            "RS Rank",
+            help=(
+                "Percentile ความแข็งแกร่งเทียบ SPY และ Reference Universe (~50 หุ้น) "
+                "เช่น 90 แปลว่าหุ้นนี้ทำผลตอบแทนเทียบตลาดได้ดีกว่า 90% ของหุ้นในกลุ่มอ้างอิง "
+                "— นี่คือ 'อันดับความแข็งแกร่ง' ไม่ใช่ '% โอกาสที่จะกำไร'"
+            ),
+        ),
+        "Score": st.column_config.NumberColumn(
+            "Score",
+            help=(
+                "คะแนนรวม 0-100 จากกฎที่ตั้งไว้ล่วงหน้า (Trend/RS/Breakout/Volume/Momentum/Market) "
+                "ไม่ใช่ความน่าจะเป็นทางสถิติที่ผ่านการพิสูจน์ — ควรดูผลจากแท็บ Backtest "
+                "หรือ Journal Analytics ประกอบก่อนเชื่อถือ"
+            ),
+        ),
+    },
+)
 
 # ------------------------------------------------------------
 # Plain-language summaries (v26) — translates the breakdown into a
@@ -1036,6 +1061,11 @@ if run_bt:
                 "คะแนนมีความหมายจริงสำหรับหุ้นและช่วงเวลานี้ — แต่ผลย้อนหลังไม่การันตีอนาคต และตัวเลขจากไม้น้อย "
                 "ยังไม่มีนัยสำคัญทางสถิติ ควรดูจำนวน Trades ประกอบเสมอ"
             )
+            if not summary.empty and "Trades" in summary.columns and summary["Trades"].max() < 20:
+                st.warning(
+                    "⚠️ จำนวน Trades ในทุก Action bucket ยังน้อยกว่า 20 รายการ — Win Rate / Avg Return ที่เห็น "
+                    "อาจเป็นผลจากความบังเอิญ ไม่ใช่ edge ที่แท้จริง ควรขยายช่วงเวลาย้อนหลังหรือเพิ่มจำนวนหุ้นก่อนสรุปผล"
+                )
             st.download_button(
                 "⬇️ ดาวน์โหลดผล Backtest แบบละเอียด (CSV)",
                 data=bt_df_display.to_csv(index=False).encode("utf-8-sig"),
@@ -1349,6 +1379,12 @@ if journal_enabled:
                 "จากข้อมูลการเทรดจริงของคุณเอง ไม่ใช่ทฤษฎี — ยิ่งสะสมข้อมูลเยอะ ยิ่งเชื่อถือได้มากขึ้น "
                 "(ตัวเลขจากไม้น้อยๆ ยังไม่มีนัยสำคัญทางสถิติ)"
             )
+            if not band_summary.empty and band_summary["Trades"].max() < 20:
+                st.warning(
+                    "⚠️ ทุก Score Band ยังมีไม้น้อยกว่า 20 รายการ — Win Rate / Avg Gain ที่เห็นตอนนี้ "
+                    "ยังไม่น่าเชื่อถือพอที่จะใช้ตัดสินใจปรับขนาดโพซิชันหรือเลือกเกณฑ์ Score ขั้นต่ำ "
+                    "ควรสะสมไม้ให้มากขึ้นก่อน"
+                )
         else:
             st.caption("ยังไม่มีรายการที่ปิดสถานะ — Equity Curve จะแสดงเมื่อมีการปิดสถานะอย่างน้อย 1 รายการ")
     else:
