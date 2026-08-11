@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 from datetime import datetime, timedelta
+import concurrent.futures
 
 st.set_page_config(
     page_title="🦅 นักล่าหุ้น Swing",
@@ -343,14 +344,16 @@ def load_earnings(ticker):
         cal = t.get_earnings_dates(limit=4)
         if cal is None or cal.empty:
             return None, None
-        now = pd.Timestamp.now(tz=cal.index.tz)
+        # Bug fix: ตรวจสอบ timezone ก่อน — ถ้า index มี tz ใช้ tz-aware, ถ้าไม่มีใช้ naive
+        tz = getattr(cal.index, "tz", None)
+        now = pd.Timestamp.now(tz=tz) if tz is not None else pd.Timestamp.now()
         future = cal[cal.index >= now]
         if future.empty:
             return None, None
         nxt = future.index.min()
         days = (nxt - now).days
-        return nxt.date(), days
-    except:
+        return nxt.date(), int(days)
+    except Exception:
         return None, None
 
 # ============================================================
@@ -487,9 +490,13 @@ def swing_score(row, rs_rank, spy_ok):
     bd["ตลาดรวม"] = pts; s += pts
 
     # Hard gate: วอลุ่มต่ำมาก cap ที่ 35
+    # Bug fix: ไม่ใส่ boolean ลงใน bd dict เพราะ Tab 3 จะนำ val ไปคำนวณ int(val/mx*100)
+    # แยก flag ออกมาเป็น key พิเศษ "_chop" แทน เพื่อไม่ให้ผสม type
     if row["RVOL"] < 0.8:
         s = min(s, 35)
-        bd["⚠️ วอลุ่มต่ำ"] = True
+        bd["_chop"] = True  # underscore = internal flag, ไม่แสดงเป็น score bar
+    else:
+        bd["_chop"] = False
 
     return s, bd
 
@@ -679,17 +686,27 @@ if tickers:
     raw_rs = {}
     all_dfs = {}
 
-    prog = st.progress(0.0, text="กำลังโหลดข้อมูล...")
-    for i, t in enumerate(ranking_uni):
-        df = load_data(t)
+    # Bug fix 3: ดึงข้อมูลแบบ Parallel (ThreadPoolExecutor) แทนทีละตัว
+    # ลดเวลา cold start จาก ~30 วินาที เหลือ ~3-5 วินาที
+    def fetch_and_prep(ticker):
+        df = load_data(ticker)
         if df is not None and len(df) > 30:
-            df = calc_indicators(df)
-            all_dfs[t] = df
-            if spy_df is not None:
-                raw_rs[t] = calc_rs(df["Close"], spy_df["Close"])
-            else:
-                raw_rs[t] = np.nan
-        prog.progress((i + 1) / len(ranking_uni))
+            return ticker, calc_indicators(df)
+        return ticker, None
+
+    prog = st.progress(0.0, text="⚡ กำลังโหลดข้อมูลแบบรวดเร็ว...")
+    completed = 0
+    total = len(ranking_uni)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+        future_map = {executor.submit(fetch_and_prep, t): t for t in ranking_uni}
+        for future in concurrent.futures.as_completed(future_map):
+            ticker, df = future.result()
+            if df is not None:
+                all_dfs[ticker] = df
+                raw_rs[ticker] = calc_rs(df["Close"], spy_df["Close"]) if spy_df is not None else np.nan
+            completed += 1
+            prog.progress(completed / total, text=f"⚡ โหลดแล้ว {completed}/{total} หุ้น...")
     prog.empty()
 
     rs_ranks = rank_universe(raw_rs)
@@ -969,23 +986,32 @@ if tickers:
 
             with col_left:
                 st.markdown("**📋 คะแนนแยกรายหัวข้อ**")
+                # Bug fix: แสดง warning วอลุ่มต่ำจาก _chop flag แยกต่างหาก
+                # ไม่วนลูปผ่าน flag เพราะ val จะเป็น boolean ไม่ใช่ int
+                if r["breakdown"].get("_chop", False):
+                    st.warning("⚠️ วอลุ่มต่ำมาก — คะแนนถูกจำกัดไว้ที่ 35 (ไม่มีแรงซื้อจริงรองรับ)")
+                maxes = {
+                    "แนวโน้ม EMA": 15, "RS Rank": 25, "Breakout": 15,
+                    "วอลุ่ม": 15, "MACD": 10, "RSI Zone": 10,
+                    "Momentum 5วัน": 5, "ตลาดรวม": 5
+                }
                 for key, val in r["breakdown"].items():
-                    if key == "⚠️ วอลุ่มต่ำ":
-                        st.warning("⚠️ วอลุ่มต่ำ — คะแนนถูกจำกัดที่ 35")
+                    # ข้าม internal flags ที่ขึ้นต้นด้วย _ ทั้งหมด
+                    if key.startswith("_"):
                         continue
-                    maxes = {
-                        "แนวโน้ม EMA": 15, "RS Rank": 25, "Breakout": 15,
-                        "วอลุ่ม": 15, "MACD": 10, "RSI Zone": 10,
-                        "Momentum 5วัน": 5, "ตลาดรวม": 5
-                    }
                     mx = maxes.get(key, 10)
-                    bar_w = int(val / mx * 100) if mx > 0 else 0
-                    bar_color = "#3fb950" if val == mx else ("#d29922" if val > 0 else "#f85149")
+                    # val ต้องเป็น int/float เท่านั้น — type guard ป้องกัน crash
+                    try:
+                        val_num = int(val)
+                    except (TypeError, ValueError):
+                        continue
+                    bar_w = int(val_num / mx * 100) if mx > 0 else 0
+                    bar_color = "#3fb950" if val_num == mx else ("#d29922" if val_num > 0 else "#f85149")
                     st.markdown(f"""
                     <div style="margin-bottom:10px">
                         <div style="display:flex; justify-content:space-between; font-size:13px">
                             <span style="color:#e6edf3">{key}</span>
-                            <span style="color:{bar_color}; font-family:'IBM Plex Mono',monospace">{val}/{mx}</span>
+                            <span style="color:{bar_color}; font-family:'IBM Plex Mono',monospace">{val_num}/{mx}</span>
                         </div>
                         <div class="score-bar-wrap" style="margin-top:4px">
                             <div class="score-bar-fill" style="width:{bar_w}%; background:{bar_color}"></div>
