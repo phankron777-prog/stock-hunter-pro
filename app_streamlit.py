@@ -635,7 +635,7 @@ st.markdown("""
 # ============================================================
 with st.sidebar:
     st.markdown("### ⚙️ ตั้งค่า")
-    capital = st.number_input("เงินทุน ($)", value=10000, step=500,
+    capital = st.number_input("เงินทุน ($)", value=10000.0, step=500.0, min_value=100.0, max_value=10000000.0,
                                help="ใช้คำนวณขนาดไม้")
     risk_pct = st.slider("ความเสี่ยงต่อไม้ (%)", 0.5, 3.0, 1.0, 0.5,
                           help="1% = สูญได้มากที่สุด 1% ต่อไม้")
@@ -1049,9 +1049,9 @@ if tickers:
             calc_ticker = st.selectbox("เลือกหุ้น", ticker_options, key="calc_t")
             cal = next((r for r in results if r["ticker"] == calc_ticker), None)
             if cal:
-                custom_entry = st.number_input("ราคาเข้าจริง ($)", value=float(cal["price"]), step=0.5)
-                custom_stop  = st.number_input("Stop Loss ($)", value=float(cal["stop"]), step=0.5)
-                custom_cap   = st.number_input("เงินทุน ($)", value=float(capital), step=500)
+                custom_entry = st.number_input("ราคาเข้าจริง ($)", value=float(cal["price"]), step=0.5, min_value=0.01)
+                custom_stop  = st.number_input("Stop Loss ($)", value=float(cal["stop"]), step=0.5, min_value=0.01)
+                custom_cap   = st.number_input("เงินทุน ($)", value=float(capital), step=500.0, min_value=100.0)
                 custom_risk  = st.slider("ความเสี่ยงต่อไม้ (%)", 0.5, 3.0, float(risk_pct), 0.25)
 
         with col_b:
