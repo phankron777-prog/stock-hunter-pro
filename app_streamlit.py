@@ -618,14 +618,26 @@ def rank_universe(scores: dict):
 # POSITION SIZING
 # ============================================================
 def calc_position(capital, price, atr, risk_pct=1.0, atr_mult=2.0, max_pct=20.0):
+    # แปลงทุกค่าเป็น float ก่อนเพื่อป้องกัน numpy float64 ผสมกับ Python int
+    try:
+        capital  = float(capital)
+        price    = float(price)
+        atr      = float(atr)
+        risk_pct = float(risk_pct)
+        atr_mult = float(atr_mult)
+        max_pct  = float(max_pct)
+    except (TypeError, ValueError):
+        return 0, 0.0, 0.0
+
     stop_dist = atr * atr_mult
     if stop_dist <= 0 or price <= 0:
-        return 0, 0, 0
-    risk_usd = capital * risk_pct / 100
-    shares = int(risk_usd / stop_dist)
-    max_shares = int(capital * max_pct / 100 / price)
-    shares = min(shares, max_shares)
-    return shares, shares * price, risk_usd
+        return 0, 0.0, 0.0
+
+    risk_usd   = capital * risk_pct / 100.0
+    shares     = int(risk_usd / stop_dist)
+    max_shares = int(capital * max_pct / 100.0 / price)
+    shares     = max(0, min(shares, max_shares))
+    return shares, float(shares * price), float(risk_usd)
 
 # ============================================================
 # HEADER
@@ -720,20 +732,28 @@ if tickers:
         last = df.iloc[-1]
         rs_rank = rs_ranks.get(t, np.nan)
 
+        # แปลงค่าจาก numpy → Python float ทั้งหมดตั้งแต่ต้น ป้องกัน ValueError ทุกจุด
+        price_f   = float(last["Close"])
+        atr_f     = float(last["ATR"])
+        rvol_f    = float(last["RVOL"])
+        rsi_f     = float(last["RSI"])
+        mom5_f    = float(last["Mom5"])
+        macd_f    = float(last["MACD"])
+        macd_sig_f = float(last["MACD_Sig"])
+
         score, breakdown = swing_score(last, rs_rank, spy_ok)
         action = classify(score)
         prob, signals = uptrend_probability(df, rs_rank, spy_ok)
 
-        shares, pos_val, risk_usd = calc_position(capital, last["Close"],
-                                                    last["ATR"], risk_pct, atr_mult)
-        stop_price = last["Close"] - last["ATR"] * atr_mult
-        target1    = last["Close"] + last["ATR"] * atr_mult * 1.5  # 1.5R
-        target2    = last["Close"] + last["ATR"] * atr_mult * 3.0  # 3R
+        shares, pos_val, risk_usd = calc_position(capital, price_f, atr_f, risk_pct, atr_mult)
+        stop_price = round(price_f - atr_f * float(atr_mult), 2)
+        target1    = round(price_f + atr_f * float(atr_mult) * 1.5, 2)
+        target2    = round(price_f + atr_f * float(atr_mult) * 3.0, 2)
 
         live_price = load_live_price(t)
         gap_pct = None
-        if live_price and last["Close"] > 0:
-            gap_pct = (live_price - last["Close"]) / last["Close"] * 100
+        if live_price and price_f > 0:
+            gap_pct = round((live_price - price_f) / price_f * 100, 2)
 
         earn_date, earn_days = load_earnings(t)
 
@@ -744,22 +764,22 @@ if tickers:
             "prob": prob,
             "signals": signals,
             "breakdown": breakdown,
-            "price": last["Close"],
+            "price": price_f,
             "live_price": live_price,
             "gap_pct": gap_pct,
-            "rsi": last["RSI"],
-            "rvol": last["RVOL"],
-            "atr": last["ATR"],
-            "rs_rank": rs_rank,
-            "mom5": last["Mom5"],
-            "macd": last["MACD"],
-            "macd_sig": last["MACD_Sig"],
+            "rsi": rsi_f,
+            "rvol": rvol_f,
+            "atr": atr_f,
+            "rs_rank": float(rs_rank) if not np.isnan(rs_rank) else float("nan"),
+            "mom5": mom5_f,
+            "macd": macd_f,
+            "macd_sig": macd_sig_f,
             "shares": shares,
             "pos_val": pos_val,
             "risk_usd": risk_usd,
-            "stop": round(stop_price, 2),
-            "target1": round(target1, 2),
-            "target2": round(target2, 2),
+            "stop": stop_price,
+            "target1": target1,
+            "target2": target2,
             "earn_days": earn_days,
             "earn_date": earn_date,
         })
