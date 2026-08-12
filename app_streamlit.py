@@ -634,10 +634,11 @@ def calc_position(capital, price, atr, risk_pct=1.0, atr_mult=2.0, max_pct=20.0)
         return 0, 0.0, 0.0
 
     risk_usd   = capital * risk_pct / 100.0
-    shares     = int(risk_usd / stop_dist)
-    max_shares = int(capital * max_pct / 100.0 / price)
-    shares     = max(0, min(shares, max_shares))
-    return shares, float(shares * price), float(risk_usd)
+    # ใช้ // และ max(1,price) ป้องกัน ZeroDivisionError และ numpy int conversion
+    shares     = max(0, int(risk_usd // max(stop_dist, 0.0001)))
+    max_shares = max(0, int((capital * max_pct / 100.0) // max(price, 0.0001)))
+    shares     = min(shares, max_shares)
+    return shares, float(shares) * float(price), float(risk_usd)
 
 # ============================================================
 # HEADER
