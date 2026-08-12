@@ -832,8 +832,7 @@ if tickers and st.session_state.scan_results is not None:
                         เป้า1: <span style="color:#3fb950">${r['target1']:.2f}</span> &nbsp;|&nbsp;
                         เป้า2: <span style="color:#3fb950">${r['target2']:.2f}</span>
                       </div>
-                      <div>{sh}</div>
-                      {block_html}
+                      <div>{sh}</div>{block_html}
                     </div>
                     <div style="text-align:center;min-width:100px">
                       <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Trend Strength</div>
